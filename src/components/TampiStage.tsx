@@ -1725,10 +1725,11 @@ export const TampiStage: React.FC<TampiStageProps> = ({
     };
   }, []);
 
-  // Load IndexedDB .vrm, /tampi.vrm, or optional custom .glb model
+  // Load custom IndexedDB .vrm, custom URL, or permanent built-in /tampi.vrm
   useEffect(() => {
     const slot = customModelSlotRef.current;
     if (!slot) return;
+    if (isAvatarResolving) return;
 
     const cleanupLoaded = () => {
       if (slot.loadedVrm) {
@@ -1748,163 +1749,168 @@ export const TampiStage: React.FC<TampiStageProps> = ({
       setHasLoadedAvatar(false);
     };
 
-    const activeUrl = (vrmUrl || customGlbUrl).trim();
-    if (!activeUrl) {
-      cleanupLoaded();
-      slot.holoRoot.visible = true;
-      setGlbLoading(false);
-      return;
-    }
+    const activeUrl = (vrmUrl || customGlbUrl || '/tampi.vrm').trim();
 
     let cancelled = false;
     setGlbLoading(true);
 
-    slot.loader.load(
-      activeUrl,
-      (gltf) => {
-        if (cancelled) return;
-        cleanupLoaded();
+    const loadModelUrl = (urlToLoad: string, allowBuiltinFallback: boolean) => {
+      slot.loader.load(
+        urlToLoad,
+        (gltf) => {
+          if (cancelled) return;
+          cleanupLoaded();
 
-        const vrm = gltf.userData.vrm as VRM | undefined;
-        if (vrm) {
-          VRMUtils.removeUnnecessaryVertices(gltf.scene);
-          VRMUtils.removeUnnecessaryJoints(gltf.scene);
-          VRMUtils.rotateVRM0(vrm);
+          const vrm = gltf.userData.vrm as VRM | undefined;
+          if (vrm) {
+            VRMUtils.removeUnnecessaryVertices(gltf.scene);
+            VRMUtils.removeUnnecessaryJoints(gltf.scene);
+            VRMUtils.rotateVRM0(vrm);
 
-          vrm.scene.traverse((obj) => {
-            obj.frustumCulled = false;
-            if ((obj as THREE.Mesh).isMesh) {
-              obj.castShadow = true;
-              obj.receiveShadow = true;
+            vrm.scene.traverse((obj) => {
+              obj.frustumCulled = false;
+              if ((obj as THREE.Mesh).isMesh) {
+                obj.castShadow = true;
+                obj.receiveShadow = true;
+              }
+            });
+
+            const vrmRig = buildVrmRigCache(vrm);
+
+            // Apply sleeping pose immediately on first frame if starting in Standby mode
+            if (isSleepingRef.current) {
+              const headNode = vrmRig.head ?? vrm.humanoid?.getNormalizedBoneNode('head');
+              if (headNode) {
+                headNode.rotation.x = 0.12;
+                headNode.rotation.z = 0.025;
+              }
+              if (vrm.expressionManager) {
+                setVrmBlink(vrm.expressionManager, 1.0);
+                if (vrm.expressionManager.getExpression('Fcl_EYE_Natural')) {
+                  vrm.expressionManager.setValue('Fcl_EYE_Natural', 0);
+                }
+              }
+            }
+
+            vrm.update(0);
+
+            // Scale & frame neatly from the chest up aligned to portrait camera & halo ring
+            const box = new THREE.Box3().setFromObject(vrm.scene);
+            const size = new THREE.Vector3();
+            const center = new THREE.Vector3();
+            box.getSize(size);
+            box.getCenter(center);
+
+            if (size.y > 0.05) {
+              const scale = 1.66 / size.y;
+              vrm.scene.scale.setScalar(scale);
+              box.setFromObject(vrm.scene);
+              box.getCenter(center);
+              vrm.scene.position.x -= center.x;
+              vrm.scene.position.z -= center.z;
+              vrm.scene.updateMatrixWorld(true);
+
+              const headNode = vrm.humanoid?.getNormalizedBoneNode('head');
+              if (headNode) {
+                const headWorldPos = new THREE.Vector3();
+                headNode.getWorldPosition(headWorldPos);
+                vrm.scene.position.y += 1.48 - headWorldPos.y;
+              } else {
+                vrm.scene.position.y -= box.min.y;
+              }
+            }
+
+            slot.scene.add(vrm.scene);
+            slot.loadedVrm = vrm;
+            slot.vrmRig = vrmRig;
+            slot.holoRoot.visible = false;
+            setHasLoadedAvatar(true);
+            setGlbLoading(false);
+            return;
+          }
+
+          // Standard GLB fallback
+          const model = gltf.scene;
+          tuneArmBonesToRestPose(model);
+
+          const morphMeshes: THREE.Mesh[] = [];
+          let headBone: THREE.Bone | null = null;
+          let spineBone: THREE.Bone | null = null;
+
+          model.traverse((obj) => {
+            const mesh = obj as THREE.Mesh;
+            if (mesh.isMesh) {
+              mesh.castShadow = true;
+              mesh.receiveShadow = true;
+              if (mesh.morphTargetDictionary && mesh.morphTargetInfluences) {
+                morphMeshes.push(mesh);
+              }
+            }
+            const bone = obj as THREE.Bone;
+            if (bone.isBone) {
+              if (/^head$/i.test(bone.name) || /mixamorigHead/i.test(bone.name)) {
+                headBone = bone;
+              }
+              if (
+                /^spine2?$/i.test(bone.name) ||
+                /mixamorigSpine2/i.test(bone.name)
+              ) {
+                spineBone = bone;
+              }
             }
           });
 
-          const vrmRig = buildVrmRigCache(vrm);
-
-          // Apply sleeping pose immediately on first frame if starting in Standby mode
-          if (isSleepingRef.current) {
-            const headNode = vrmRig.head ?? vrm.humanoid?.getNormalizedBoneNode('head');
-            if (headNode) {
-              headNode.rotation.x = 0.12;
-              headNode.rotation.z = 0.025;
-            }
-            if (vrm.expressionManager) {
-              setVrmBlink(vrm.expressionManager, 1.0);
-              if (vrm.expressionManager.getExpression('Fcl_EYE_Natural')) {
-                vrm.expressionManager.setValue('Fcl_EYE_Natural', 0);
-              }
-            }
-          }
-
-          vrm.update(0);
-
-          // Scale & frame neatly from the chest up aligned to portrait camera & halo ring
-          const box = new THREE.Box3().setFromObject(vrm.scene);
+          const box = new THREE.Box3().setFromObject(model);
           const size = new THREE.Vector3();
           const center = new THREE.Vector3();
           box.getSize(size);
           box.getCenter(center);
 
-          if (size.y > 0.05) {
-            const scale = 1.66 / size.y;
-            vrm.scene.scale.setScalar(scale);
-            box.setFromObject(vrm.scene);
+          if (size.y > 0.01) {
+            const scale = 1.72 / size.y;
+            model.scale.setScalar(scale);
+            box.setFromObject(model);
             box.getCenter(center);
-            vrm.scene.position.x -= center.x;
-            vrm.scene.position.z -= center.z;
-            vrm.scene.updateMatrixWorld(true);
-
-            const headNode = vrm.humanoid?.getNormalizedBoneNode('head');
-            if (headNode) {
-              const headWorldPos = new THREE.Vector3();
-              headNode.getWorldPosition(headWorldPos);
-              vrm.scene.position.y += 1.48 - headWorldPos.y;
-            } else {
-              vrm.scene.position.y -= box.min.y;
-            }
+            model.position.x -= center.x;
+            model.position.z -= center.z;
+            model.position.y -= box.min.y;
           }
 
-          slot.scene.add(vrm.scene);
-          slot.loadedVrm = vrm;
-          slot.vrmRig = vrmRig;
+          slot.scene.add(model);
+          slot.loadedModel = model;
+          slot.morphMeshes = morphMeshes;
+          slot.headBone = headBone;
+          slot.spineBone = spineBone;
           slot.holoRoot.visible = false;
           setHasLoadedAvatar(true);
           setGlbLoading(false);
-          return;
-        }
-
-        // Standard GLB fallback
-        const model = gltf.scene;
-        tuneArmBonesToRestPose(model);
-
-        const morphMeshes: THREE.Mesh[] = [];
-        let headBone: THREE.Bone | null = null;
-        let spineBone: THREE.Bone | null = null;
-
-        model.traverse((obj) => {
-          const mesh = obj as THREE.Mesh;
-          if (mesh.isMesh) {
-            mesh.castShadow = true;
-            mesh.receiveShadow = true;
-            if (mesh.morphTargetDictionary && mesh.morphTargetInfluences) {
-              morphMeshes.push(mesh);
-            }
+        },
+        undefined,
+        () => {
+          if (cancelled) return;
+          if (allowBuiltinFallback && urlToLoad !== '/tampi.vrm') {
+            glbErrorCbRef.current?.(
+              'Could not load custom avatar — restored built-in Tampi.',
+            );
+            loadModelUrl('/tampi.vrm', false);
+            return;
           }
-          const bone = obj as THREE.Bone;
-          if (bone.isBone) {
-            if (/^head$/i.test(bone.name) || /mixamorigHead/i.test(bone.name)) {
-              headBone = bone;
-            }
-            if (
-              /^spine2?$/i.test(bone.name) ||
-              /mixamorigSpine2/i.test(bone.name)
-            ) {
-              spineBone = bone;
-            }
-          }
-        });
+          cleanupLoaded();
+          slot.holoRoot.visible = true;
+          setGlbLoading(false);
+          glbErrorCbRef.current?.(
+            'Could not load Tampi 3D avatar.',
+          );
+        },
+      );
+    };
 
-        const box = new THREE.Box3().setFromObject(model);
-        const size = new THREE.Vector3();
-        const center = new THREE.Vector3();
-        box.getSize(size);
-        box.getCenter(center);
-
-        if (size.y > 0.01) {
-          const scale = 1.72 / size.y;
-          model.scale.setScalar(scale);
-          box.setFromObject(model);
-          box.getCenter(center);
-          model.position.x -= center.x;
-          model.position.z -= center.z;
-          model.position.y -= box.min.y;
-        }
-
-        slot.scene.add(model);
-        slot.loadedModel = model;
-        slot.morphMeshes = morphMeshes;
-        slot.headBone = headBone;
-        slot.spineBone = spineBone;
-        slot.holoRoot.visible = false;
-        setHasLoadedAvatar(true);
-        setGlbLoading(false);
-      },
-      undefined,
-      () => {
-        if (cancelled) return;
-        cleanupLoaded();
-        slot.holoRoot.visible = true;
-        setGlbLoading(false);
-        glbErrorCbRef.current?.(
-          'Could not load that .vrm avatar file. Upload a valid .vrm in Settings.',
-        );
-      },
-    );
+    loadModelUrl(activeUrl, activeUrl !== '/tampi.vrm');
 
     return () => {
       cancelled = true;
     };
-  }, [vrmUrl, customGlbUrl]);
+  }, [isAvatarResolving, vrmUrl, customGlbUrl]);
 
   const showHoloLoading = isAvatarResolving || glbLoading;
   const showNoAvatarHint = !showHoloLoading && !hasLoadedAvatar && !webglUnavailable;
@@ -1924,7 +1930,7 @@ export const TampiStage: React.FC<TampiStageProps> = ({
       {showNoAvatarHint && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center pt-56">
           <div className="rounded-xl bg-[#071120]/85 border border-cyan-400/25 px-4 py-2 text-xs text-cyan-200/85">
-            Upload your .vrm avatar in Settings or add public/tampi.vrm
+            Holographic standby active · Built-in avatar unavailable
           </div>
         </div>
       )}

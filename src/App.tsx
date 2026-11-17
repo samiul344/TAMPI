@@ -73,8 +73,8 @@ import {
   saveTasks,
 } from './utils/storage';
 import {
-  checkDefaultPublicVrm,
   clearVrmFromIndexedDb,
+  DEFAULT_BUILTIN_VRM_URL,
   loadVrmFromIndexedDb,
   saveVrmToIndexedDb,
 } from './utils/vrmStorage';
@@ -153,7 +153,7 @@ export default function App() {
   );
   const [history, setHistory] = useState<ChatTurn[]>(() => loadHistory('guest'));
 
-  const [vrmUrl, setVrmUrl] = useState<string>('');
+  const [vrmUrl, setVrmUrl] = useState<string>(DEFAULT_BUILTIN_VRM_URL);
   const [vrmMetadata, setVrmMetadata] = useState<VrmMetadata | null>(null);
   const [vrmResolving, setVrmResolving] = useState(true);
   const [vrmUploading, setVrmUploading] = useState(false);
@@ -293,7 +293,7 @@ export default function App() {
     }, 3800);
   }, []);
 
-  // Load persisted .vrm file from IndexedDB (or public/tampi.vrm) immediately on startup
+  // Use permanent built-in /tampi.vrm by default; only load IndexedDB if user explicitly uploaded a custom .vrm in Settings
   useEffect(() => {
     let active = true;
     (async () => {
@@ -306,12 +306,13 @@ export default function App() {
           setVrmMetadata(loaded.metadata);
           return;
         }
-        const hasDefaultPublicVrm = await checkDefaultPublicVrm();
-        if (active && hasDefaultPublicVrm) {
-          setVrmUrl('/tampi.vrm');
-        }
+        setVrmUrl(DEFAULT_BUILTIN_VRM_URL);
+        setVrmMetadata(null);
       } catch {
-        // non-fatal IndexedDB read error
+        if (active) {
+          setVrmUrl(DEFAULT_BUILTIN_VRM_URL);
+          setVrmMetadata(null);
+        }
       } finally {
         if (active) {
           setVrmResolving(false);
@@ -339,7 +340,7 @@ export default function App() {
         activeVrmBlobRef.current = saved.blobUrl;
         setVrmUrl(saved.blobUrl);
         setVrmMetadata(saved.metadata);
-        showToast(`Loaded ${saved.metadata.name}`);
+        showToast(`Loaded custom avatar: ${saved.metadata.name}`);
       } catch (err) {
         showToast(
           err instanceof Error
@@ -363,10 +364,9 @@ export default function App() {
       URL.revokeObjectURL(activeVrmBlobRef.current);
       activeVrmBlobRef.current = '';
     }
-    const hasDefaultPublicVrm = await checkDefaultPublicVrm();
-    setVrmUrl(hasDefaultPublicVrm ? '/tampi.vrm' : '');
+    setVrmUrl(DEFAULT_BUILTIN_VRM_URL);
     setVrmMetadata(null);
-    showToast('Removed custom .vrm avatar');
+    showToast('Restored built-in Tampi avatar');
   }, [showToast]);
 
   const profileSyncTimerRef = useRef<number | null>(null);
@@ -377,6 +377,20 @@ export default function App() {
         | Partial<TampiSettings>
         | ((prev: TampiSettings) => TampiSettings),
     ) => {
+      if (
+        typeof updater === 'object' &&
+        typeof updater.customGlbUrl === 'string' &&
+        updater.customGlbUrl.trim()
+      ) {
+        void clearVrmFromIndexedDb().catch(() => {});
+        if (activeVrmBlobRef.current) {
+          URL.revokeObjectURL(activeVrmBlobRef.current);
+          activeVrmBlobRef.current = '';
+        }
+        setVrmMetadata(null);
+        setVrmUrl(DEFAULT_BUILTIN_VRM_URL);
+      }
+
       setSettings((prev) => {
         const rawNext =
           typeof updater === 'function' ? updater(prev) : { ...prev, ...updater };
@@ -1475,6 +1489,10 @@ export default function App() {
 
         recognition.onerror = (event) => {
           if (disposed) return;
+          if (event.error === 'no-speech') {
+            // Normal silence timeout — ignore and let onend perform the 300ms debounced restart
+            return;
+          }
           if (
             event.error === 'not-allowed' ||
             event.error === 'service-not-allowed'
@@ -1484,12 +1502,18 @@ export default function App() {
             setStandbyAudioDetected(false);
             setStandbyHeardText('');
             setMicPermissionNeeded(true);
-          } else if (
-            event.error === 'audio-capture' ||
-            event.error === 'aborted'
-          ) {
+          } else if (event.error === 'audio-capture') {
             consecutiveStartFailures += 1;
             if (consecutiveStartFailures >= 3) {
+              disposed = true;
+              setStandbyListening(false);
+              setStandbyAudioDetected(false);
+              setStandbyHeardText('');
+              setMicPermissionNeeded(true);
+            }
+          } else if (event.error === 'aborted') {
+            consecutiveStartFailures += 1;
+            if (consecutiveStartFailures >= 5) {
               disposed = true;
               setStandbyListening(false);
               setStandbyAudioDetected(false);
@@ -1501,16 +1525,21 @@ export default function App() {
 
         recognition.onend = () => {
           if (disposed) return;
-          setStandbyListening(false);
-          const delay = consecutiveStartFailures > 0 ? 350 : 180;
+          // Keep standbyListening steady during silent 300ms background restarts so UI never flickers
+          if (restartTimer !== null) {
+            window.clearTimeout(restartTimer);
+          }
+          const delay = consecutiveStartFailures > 0 ? 450 : 300;
           restartTimer = window.setTimeout(() => {
-            startListener();
+            restartTimer = null;
+            if (!disposed) {
+              startListener();
+            }
           }, delay);
         };
 
         recognition.start();
       } catch (err) {
-        setStandbyListening(false);
         const errName = err instanceof Error ? err.name : '';
         const errMsg = err instanceof Error ? err.message.toLowerCase() : '';
         const isPermissionBlock =
@@ -1521,11 +1550,18 @@ export default function App() {
         consecutiveStartFailures += 1;
         if (isPermissionBlock || consecutiveStartFailures >= 4) {
           disposed = true;
+          setStandbyListening(false);
           setMicPermissionNeeded(true);
         } else {
+          if (restartTimer !== null) {
+            window.clearTimeout(restartTimer);
+          }
           restartTimer = window.setTimeout(() => {
-            startListener();
-          }, 320);
+            restartTimer = null;
+            if (!disposed) {
+              startListener();
+            }
+          }, 300);
         }
       }
     };
@@ -1763,6 +1799,45 @@ export default function App() {
     updateSettings((prev) => ({ ...prev, language: lang }));
   };
 
+  const activateVoiceStandby = useCallback(async () => {
+    unlockAudioPlayback();
+    if (!getSpeechRecognitionCtor()) {
+      showToast(
+        'Voice-code Standby Wake requires a browser with Web Speech API (Chrome / Edge).',
+      );
+      return;
+    }
+
+    try {
+      let micAlreadyGranted = false;
+      if (navigator.permissions?.query) {
+        try {
+          const perm = await navigator.permissions.query({
+            name: 'microphone' as PermissionName,
+          });
+          micAlreadyGranted = perm.state === 'granted';
+        } catch {
+          // Ignore browsers without microphone permissions query support
+        }
+      }
+
+      if (!micAlreadyGranted && navigator.mediaDevices?.getUserMedia) {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((track) => track.stop());
+      }
+
+      standbyManuallyMutedRef.current = false;
+      setMicPermissionNeeded(false);
+      if (!settingsRef.current.standbyWakeEnabled) {
+        updateSettings({ standbyWakeEnabled: true });
+      }
+      setStandbyRetryNonce((n) => n + 1);
+      showToast('Voice standby active — speak your secret wake code');
+    } catch {
+      showToast('Please allow microphone access in your browser settings.');
+    }
+  }, [showToast, updateSettings]);
+
   const handleToggleStandbyWake = async () => {
     unlockAudioPlayback();
     if (!getSpeechRecognitionCtor()) {
@@ -1773,19 +1848,7 @@ export default function App() {
     }
 
     if (micPermissionNeeded) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach((track) => track.stop());
-        standbyManuallyMutedRef.current = false;
-        setMicPermissionNeeded(false);
-        updateSettings({ standbyWakeEnabled: true });
-        window.setTimeout(() => {
-          setStandbyRetryNonce((n) => n + 1);
-        }, 150);
-        showToast('Mic unlocked — listening for your voice code');
-      } catch {
-        showToast('Please allow microphone access in your browser settings.');
-      }
+      await activateVoiceStandby();
       return;
     }
 
@@ -1831,6 +1894,24 @@ export default function App() {
     !bootSequenceActive &&
     (sleepSequenceActive || (!liveConnected && assistantState === 'idle'));
 
+  const showTapToEnableStandby =
+    micPermissionNeeded &&
+    settings.standbyWakeEnabled &&
+    !needsVoiceCodeSetup &&
+    !voiceCommandsOpen &&
+    !settingsOpen &&
+    !memoryOpen &&
+    !liveConnected &&
+    assistantState === 'idle';
+
+  const resolvedVrmUrl = vrmMetadata
+    ? vrmUrl
+    : settings.customGlbUrl.trim()
+      ? ''
+      : DEFAULT_BUILTIN_VRM_URL;
+
+  const resolvedCustomUrl = vrmMetadata ? '' : settings.customGlbUrl.trim();
+
   return (
     <main className="relative h-screen w-screen overflow-hidden bg-[#030711]">
       {/* Full-Viewport 3D Tampi / VRM Stage */}
@@ -1839,8 +1920,8 @@ export default function App() {
         emotion={avatarEmotion}
         isSleeping={isSleeping}
         isAvatarResolving={vrmResolving}
-        vrmUrl={vrmUrl}
-        customGlbUrl={settings.customGlbUrl}
+        vrmUrl={resolvedVrmUrl}
+        customGlbUrl={resolvedCustomUrl}
         miniWidget={miniWidget}
         standbyListening={standbyListening}
         wakePulseKey={wakePulseKey}
@@ -1848,6 +1929,23 @@ export default function App() {
         getLipSyncWeights={getLipSyncWeights}
         onGlbError={showToast}
       />
+
+      {/* One-Tap Overlay when Browser Autoplay / Mic Policy Blocks SpeechRecognition */}
+      {showTapToEnableStandby && (
+        <button
+          type="button"
+          onClick={() => {
+            void activateVoiceStandby();
+          }}
+          aria-label="Tap anywhere to enable voice standby"
+          className="fixed inset-0 z-[15] flex items-center justify-center bg-[#030711]/35 cursor-pointer focus:outline-none"
+        >
+          <span className="pointer-events-none flex items-center gap-3 rounded-2xl bg-[#071122]/94 border border-amber-400/55 px-5 py-3 text-xs sm:text-sm font-medium tracking-wide text-amber-100 shadow-[0_0_32px_rgba(245,158,11,0.28)]">
+            <Mic className="h-4 w-4 text-amber-300 shrink-0" />
+            <span>Tap anywhere to enable voice standby</span>
+          </span>
+        </button>
+      )}
 
       {/* Stark J.A.R.V.I.S. Holographic HUD Reticles, Scanline Sweep & Circular Audio Visualizer */}
       <StarkHud
@@ -1976,7 +2074,7 @@ export default function App() {
               disabled={!micPermissionNeeded}
               onClick={() => {
                 if (micPermissionNeeded) {
-                  void handleToggleStandbyWake();
+                  void activateVoiceStandby();
                 }
               }}
               className={`pointer-events-auto flex max-w-[90vw] items-center gap-2 rounded-full bg-[#081322]/85 border px-3 py-1 shadow-[0_0_18px_rgba(34,211,238,0.2)] ${
@@ -1990,7 +2088,7 @@ export default function App() {
                   className={`absolute inset-0 rounded-full border ${
                     micPermissionNeeded
                       ? 'border-amber-400 opacity-75'
-                      : standbyListening
+                      : settings.standbyWakeEnabled && !needsVoiceCodeSetup
                         ? 'border-cyan-400 standby-ring-breath'
                         : 'border-cyan-400 opacity-40'
                   }`}
@@ -2015,20 +2113,13 @@ export default function App() {
                   : needsVoiceCodeSetup
                     ? 'Set voice codes first'
                     : micPermissionNeeded
-                      ? 'Tap here to unlock mic'
-                      : standbyListening
-                        ? 'Listening for voice code...'
-                        : settings.standbyWakeEnabled
-                          ? 'Standby armed'
-                          : 'Standby muted'}
+                      ? 'Tap anywhere to enable voice standby'
+                      : settings.standbyWakeEnabled
+                        ? 'Standby • Speak your secret wake code'
+                        : 'Standby muted'}
               </span>
-              {standbyListening && standbyAudioDetected && (
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
-              )}
-              {standbyListening && standbyHeardText && (
-                <span className="max-w-[140px] truncate border-l border-cyan-400/25 pl-2 text-[10px] text-emerald-200/90">
-                  Heard: &ldquo;{standbyHeardText}&rdquo;
-                </span>
+              {standbyListening && standbyAudioDetected && !micPermissionNeeded && (
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
               )}
             </button>
           )}

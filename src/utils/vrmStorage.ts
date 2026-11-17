@@ -1,5 +1,7 @@
 import { VrmMetadata } from '../types/tampi';
 
+export const DEFAULT_BUILTIN_VRM_URL = '/tampi.vrm';
+
 const DB_NAME = 'tampi_assets_db';
 const DB_VERSION = 1;
 const STORE_NAME = 'avatars';
@@ -11,6 +13,7 @@ interface StoredVrmRecord {
   size: number;
   updatedAt: string;
   buffer: ArrayBuffer;
+  isCustomUpload?: boolean;
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -40,6 +43,7 @@ export async function saveVrmToIndexedDb(file: File): Promise<{
     size: file.size,
     updatedAt: new Date().toISOString(),
     buffer,
+    isCustomUpload: true,
   };
 
   await new Promise<void>((resolve, reject) => {
@@ -81,20 +85,11 @@ export async function loadVrmFromIndexedDb(): Promise<{
       const req = store.get(ACTIVE_KEY);
       req.onsuccess = () => {
         const direct = req.result as StoredVrmRecord | undefined;
-        if (direct && direct.buffer) {
+        if (direct && direct.buffer && direct.isCustomUpload !== false) {
           resolve(direct);
           return;
         }
-        const allReq = store.getAll();
-        allReq.onsuccess = () => {
-          const all = (allReq.result as StoredVrmRecord[] | undefined) ?? [];
-          const valid = all.filter((r) => Boolean(r?.buffer));
-          valid.sort((a, b) =>
-            (b.updatedAt || '').localeCompare(a.updatedAt || ''),
-          );
-          resolve(valid[0]);
-        };
-        allReq.onerror = () => resolve(undefined);
+        resolve(undefined);
       };
       req.onerror = () =>
         reject(req.error ?? new Error('Failed to read VRM from IndexedDB.'));
@@ -137,7 +132,7 @@ export async function clearVrmFromIndexedDb(): Promise<void> {
 
 export async function checkDefaultPublicVrm(): Promise<boolean> {
   try {
-    const res = await fetch('/tampi.vrm', { method: 'HEAD' });
+    const res = await fetch(DEFAULT_BUILTIN_VRM_URL, { method: 'HEAD' });
     if (!res.ok) return false;
     const contentType = (res.headers.get('content-type') || '').toLowerCase();
     if (contentType.includes('text/html')) return false;

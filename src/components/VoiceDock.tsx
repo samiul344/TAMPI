@@ -133,7 +133,7 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({
         </div>
       )}
 
-      {/* Standby Mode Pulsing Cyan Ring Indicator (when Standby ON & Live Call idle) */}
+      {/* Steady Standby Status Pill (zero flickering on background SpeechRecognition restarts) */}
       {!liveConnected && !collapsed && (
         <button
           type="button"
@@ -156,7 +156,7 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({
               className={`absolute inset-0 rounded-full border ${
                 micPermissionNeeded
                   ? 'border-amber-400 opacity-75'
-                  : standbyListening
+                  : standbyWakeEnabled && !needsVoiceCodeSetup
                     ? 'border-cyan-400 standby-ring-breath'
                     : 'border-cyan-400 opacity-35'
               }`}
@@ -165,7 +165,7 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({
               className={`h-2 w-2 rounded-full ${
                 micPermissionNeeded
                   ? 'bg-amber-400/70'
-                  : standbyWakeEnabled
+                  : standbyWakeEnabled && !needsVoiceCodeSetup
                     ? 'border border-cyan-300 bg-cyan-400/40'
                     : 'bg-slate-500'
               }`}
@@ -185,33 +185,18 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({
               : needsVoiceCodeSetup
                 ? 'Set your private voice codes first'
                 : micPermissionNeeded
-                  ? 'Tap here to unlock mic for voice code'
-                  : standbyListening
-                    ? 'Listening for voice code...'
-                    : standbyWakeEnabled
-                      ? 'Standby Wake armed'
-                      : 'Standby listener muted'}
+                  ? 'Tap anywhere to enable voice standby'
+                  : standbyWakeEnabled
+                    ? 'Standby • Speak your secret wake code'
+                    : 'Standby listener muted'}
           </span>
 
-          {standbyListening && standbyAudioDetected && (
+          {standbyListening && standbyAudioDetected && !micPermissionNeeded && (
             <span
               title="Microphone audio detected"
               className="relative flex h-2 w-2 shrink-0"
             >
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-85" />
               <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)]" />
-            </span>
-          )}
-
-          {standbyListening && (
-            <span
-              className={`max-w-[160px] sm:max-w-[240px] truncate border-l border-cyan-400/25 pl-2 text-[11px] text-emerald-200/90 transition-opacity duration-300 ${
-                standbyHeardText
-                  ? 'opacity-100'
-                  : 'pointer-events-none max-w-0 border-l-0 pl-0 opacity-0'
-              }`}
-            >
-              {standbyHeardText ? `Heard: "${standbyHeardText}"` : ''}
             </span>
           )}
         </button>
@@ -329,7 +314,7 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({
                     {isThinking
                       ? 'Connecting live session...'
                       : micPermissionNeeded
-                        ? 'Browser requires click to allow mic'
+                        ? 'Tap anywhere to enable voice standby'
                         : standbyWakeEnabled
                           ? 'Hands-free voice activation ready'
                           : 'Standby listener muted'}

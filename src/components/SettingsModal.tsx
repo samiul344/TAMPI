@@ -169,10 +169,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </h3>
                 <p className="text-xs text-slate-400">
                   {vrmMetadata
-                    ? `${vrmMetadata.name} · ${formatBytes(vrmMetadata.size)} (IndexedDB)`
+                    ? `${vrmMetadata.name} · ${formatBytes(vrmMetadata.size)} (Custom Upload)`
                     : settings.customGlbUrl
                       ? 'Custom .vrm / .glb URL active'
-                      : 'Upload your .vrm avatar or place public/tampi.vrm'}
+                      : 'Built-in Tampi avatar (/tampi.vrm) active'}
                 </p>
               </div>
               {(vrmMetadata || settings.customGlbUrl) && (
@@ -183,9 +183,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     onUpdateSettings({ customGlbUrl: '' });
                     onClearVrm();
                   }}
-                  className="text-xs font-medium text-amber-300 hover:text-amber-200 transition-colors whitespace-nowrap shrink-0"
+                  className="flex items-center gap-1.5 rounded-lg bg-amber-500/12 border border-amber-400/35 px-2.5 py-1 text-xs font-medium text-amber-200 hover:bg-amber-500/20 transition-colors whitespace-nowrap shrink-0"
                 >
-                  Remove Custom .vrm
+                  <RotateCcw className="h-3 w-3" />
+                  <span>Reset to Built-In Tampi</span>
                 </button>
               )}
             </div>
@@ -212,12 +213,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 ) : (
                   <>
                     <Upload className="h-3.5 w-3.5 text-cyan-300" />
-                    <span>{vrmMetadata ? 'Swap .vrm Avatar File' : 'Upload .vrm Avatar File'}</span>
+                    <span>{vrmMetadata ? 'Replace Custom .vrm' : 'Upload Custom .vrm'}</span>
                   </>
                 )}
               </button>
               <span className="text-[11px] text-slate-400">
-                Supports VRoid / VRM avatars with auto sleep pose &amp; lip-sync
+                Uses built-in Tampi by default · optional custom VRoid / VRM override
               </span>
             </div>
 
