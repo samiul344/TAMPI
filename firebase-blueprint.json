@@ -1,0 +1,295 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile, secret voice codes, and Tampi assistant preferences isolated per owner UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 254
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "personaInstructions": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "customGlbUrl": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "voiceMode": {
+          "type": "string",
+          "enum": ["browser", "live"]
+        },
+        "language": {
+          "type": "string",
+          "enum": ["en-US", "bn-BD"]
+        },
+        "liveVoiceName": {
+          "type": "string",
+          "enum": ["Zephyr", "Puck", "Kore", "Fenrir", "Charon"]
+        },
+        "speechRate": {
+          "type": "number"
+        },
+        "speechPitch": {
+          "type": "number"
+        },
+        "handsFreeLoop": {
+          "type": "boolean"
+        },
+        "standbyWakeEnabled": {
+          "type": "boolean"
+        },
+        "secretWakePhrase": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "secretShutdownPhrase": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "voiceCodesConfigured": {
+          "type": "boolean"
+        },
+        "lastActiveAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "voiceMode", "language", "createdAt", "updatedAt"]
+    },
+    "UserVoiceSettings": {
+      "title": "UserVoiceSettings",
+      "description": "Private per-user voice command codes and assistant settings stored under users/{uid}/settings.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "secretWakePhrase": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "secretShutdownPhrase": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "voiceCodesConfigured": {
+          "type": "boolean"
+        },
+        "personaInstructions": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "customGlbUrl": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "voiceMode": {
+          "type": "string",
+          "enum": ["browser", "live"]
+        },
+        "language": {
+          "type": "string",
+          "enum": ["en-US", "bn-BD"]
+        },
+        "liveVoiceName": {
+          "type": "string",
+          "enum": ["Zephyr", "Puck", "Kore", "Fenrir", "Charon"]
+        },
+        "speechRate": {
+          "type": "number"
+        },
+        "speechPitch": {
+          "type": "number"
+        },
+        "handsFreeLoop": {
+          "type": "boolean"
+        },
+        "standbyWakeEnabled": {
+          "type": "boolean"
+        },
+        "lastActiveAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "secretWakePhrase", "secretShutdownPhrase", "voiceCodesConfigured", "createdAt", "updatedAt"]
+    },
+    "MemoryNote": {
+      "title": "MemoryNote",
+      "description": "Personal memory fact, note, or reminder saved privately for the user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["profile", "note", "reminder"]
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "category", "content", "createdAt"]
+    },
+    "ChatTurnRecord": {
+      "title": "ChatTurnRecord",
+      "description": "Private conversation turn stored per user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "model"]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "timestamp": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "role", "text", "timestamp", "createdAt"]
+    },
+    "StudyTaskRecord": {
+      "title": "StudyTaskRecord",
+      "description": "Private study task or goal stored per user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "subject": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "dueLabel": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "completed": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "title", "completed", "createdAt"]
+    },
+    "StudySessionItem": {
+      "title": "StudySessionItem",
+      "description": "Private completed focus sprint record stored per user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "durationMinutes": {
+          "type": "number"
+        },
+        "completedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "label", "durationMinutes", "completedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile and Tampi account metadata document."
+    },
+    "/users/{userId}/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/UserVoiceSettings" },
+      "description": "User-owned private voice wake/shutdown codes and assistant settings."
+    },
+    "/users/{userId}/memories/{memoryId}": {
+      "schema": { "$ref": "#/entities/MemoryNote" },
+      "description": "User-owned personal memory notes and reminders."
+    },
+    "/users/{userId}/history/{turnId}": {
+      "schema": { "$ref": "#/entities/ChatTurnRecord" },
+      "description": "User-owned private chat conversation history."
+    },
+    "/users/{userId}/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/StudyTaskRecord" },
+      "description": "User-owned private study tasks."
+    },
+    "/users/{userId}/sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/StudySessionItem" },
+      "description": "User-owned completed study focus sessions."
+    }
+  }
+}

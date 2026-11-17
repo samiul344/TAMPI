@@ -1,0 +1,6 @@
+{
+  "name": "Tampi",
+  "description": "Samiul's dark-themed 3D personal AI voice assistant and university admission study companion featuring a procedural Three.js avatar, bilingual Bengali and English voice loop, Gemini Live audio, personal memory, and voice-triggered study timer.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
