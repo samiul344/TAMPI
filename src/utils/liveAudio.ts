@@ -109,13 +109,14 @@ export class GeminiLiveClient {
     language: LanguageCode;
     voiceName: LiveVoiceName;
     history: ChatTurn[];
+    wakeTrigger?: string;
   }): Promise<void> {
     this.disconnect();
     this.isDisconnected = false;
 
-    // Unlock playback AudioContext eagerly inside click call chain
+    // 1. Unlock & Resume Playback AudioContext Immediately on First Wake-Up
     this.outputCtx = new AudioContext({ sampleRate: 24000 });
-    void this.outputCtx.resume();
+    await this.outputCtx.resume();
     this.analyser = this.outputCtx.createAnalyser();
     this.analyser.fftSize = 256;
     this.analyser.smoothingTimeConstant = 0.55;
@@ -135,13 +136,13 @@ export class GeminiLiveClient {
     if (this.isDisconnected) return;
 
     this.inputCtx = new AudioContext({ sampleRate: 16000 });
-    void this.inputCtx.resume();
+    await this.inputCtx.resume();
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/live`;
     this.ws = new WebSocket(wsUrl);
 
-    this.ws.onopen = () => {
+    this.ws.onopen = async () => {
       if (this.isDisconnected) return;
       this.ws?.send(
         JSON.stringify({
@@ -165,8 +166,23 @@ export class GeminiLiveClient {
             role: h.role,
             text: h.text,
           })),
+          wakeTrigger: config.wakeTrigger,
         }),
       );
+
+      // Wait 150ms for the audio output buffer to attach before sending wake greeting trigger
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      if (this.isDisconnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+      if (config.wakeTrigger) {
+        this.ws.send(
+          JSON.stringify({
+            type: 'text',
+            text: config.wakeTrigger,
+            turnComplete: true,
+          }),
+        );
+      }
     };
 
     this.ws.onmessage = (event) => {

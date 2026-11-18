@@ -505,6 +505,7 @@ export const TampiStage: React.FC<TampiStageProps> = ({
   const glbErrorCbRef = useRef(onGlbError);
 
   const [glbLoading, setGlbLoading] = useState(false);
+  const [loadProgress, setLoadProgress] = useState(0);
   const [hasLoadedAvatar, setHasLoadedAvatar] = useState(false);
   const [webglUnavailable, setWebglUnavailable] = useState(false);
 
@@ -1755,6 +1756,7 @@ export const TampiStage: React.FC<TampiStageProps> = ({
     setGlbLoading(true);
 
     const loadModelUrl = (urlToLoad: string, allowBuiltinFallback: boolean) => {
+      setLoadProgress(0);
       slot.loader.load(
         urlToLoad,
         (gltf) => {
@@ -1885,8 +1887,16 @@ export const TampiStage: React.FC<TampiStageProps> = ({
           setHasLoadedAvatar(true);
           setGlbLoading(false);
         },
-        undefined,
-        () => {
+        (xhr) => {
+          if (cancelled) return;
+          if (xhr.lengthComputable && xhr.total > 0) {
+            const pct = Math.round((xhr.loaded / xhr.total) * 100);
+            setLoadProgress(pct);
+          } else {
+            setLoadProgress((prev) => Math.min(95, prev + 12));
+          }
+        },
+        (err) => {
           if (cancelled) return;
           if (allowBuiltinFallback && urlToLoad !== '/tampi.vrm') {
             glbErrorCbRef.current?.(
@@ -1898,9 +1908,8 @@ export const TampiStage: React.FC<TampiStageProps> = ({
           cleanupLoaded();
           slot.holoRoot.visible = true;
           setGlbLoading(false);
-          glbErrorCbRef.current?.(
-            'Could not load Tampi 3D avatar.',
-          );
+          const reason = err instanceof Error ? err.message : 'Network load or GLTF parse failure';
+          glbErrorCbRef.current?.(`Could not load Tampi 3D avatar: ${reason}`);
         },
       );
     };
@@ -1922,7 +1931,7 @@ export const TampiStage: React.FC<TampiStageProps> = ({
       {showHoloLoading && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center pt-56">
           <div className="rounded-xl bg-[#071120]/88 border border-cyan-400/35 px-4 py-2 text-xs font-medium tracking-wide text-cyan-200 shadow-[0_0_24px_rgba(34,211,238,0.2)]">
-            Loading Tampi .vrm avatar...
+            Loading 3D Model... {loadProgress > 0 ? `${loadProgress}%` : 'Connecting...'}
           </div>
         </div>
       )}

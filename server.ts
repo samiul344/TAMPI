@@ -437,6 +437,7 @@ async function startServer() {
           userName?: string;
           audio?: string;
           text?: string;
+          turnComplete?: boolean;
           persona?: string;
           memories?: MemoryPayload[];
           tasks?: TaskPayload[];
@@ -630,9 +631,21 @@ async function startServer() {
             },
           });
         } else if (msg.type === 'text' && msg.text && liveSession) {
-          liveSession.sendRealtimeInput({
-            text: msg.text,
-          });
+          if (msg.turnComplete) {
+            liveSession.sendClientContent({
+              turns: [
+                {
+                  role: 'user',
+                  parts: [{ text: msg.text }],
+                },
+              ],
+              turnComplete: true,
+            });
+          } else {
+            liveSession.sendRealtimeInput({
+              text: msg.text,
+            });
+          }
         }
       } catch (err) {
         const errorObj = err as Error;

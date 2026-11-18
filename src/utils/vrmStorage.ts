@@ -1,6 +1,9 @@
 import { VrmMetadata } from '../types/tampi';
 
-export const DEFAULT_BUILTIN_VRM_URL = '/tampi.vrm';
+export const DEFAULT_BUILTIN_VRM_URL =
+  typeof window !== 'undefined'
+    ? new URL('tampi.vrm', window.location.origin + (import.meta.env?.BASE_URL || '/')).href
+    : '/tampi.vrm';
 
 const DB_NAME = 'tampi_assets_db';
 const DB_VERSION = 1;
