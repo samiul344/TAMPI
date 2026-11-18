@@ -62,14 +62,18 @@ import {
   clearHistoryStorage,
   loadHistory,
   loadLastActiveAt,
+  loadLastWakeStyleIndex,
   loadMemories,
+  loadRecentWakeOpenings,
   loadSessions,
   loadSettings,
   loadTasks,
   purgeLegacyUnscopedVoiceStorage,
   saveHistory,
   saveLastActiveAt,
+  saveLastWakeStyleIndex,
   saveMemories,
+  saveRecentWakeOpening,
   saveSessions,
   saveSettings,
   saveTasks,
@@ -99,6 +103,7 @@ import {
   buildDynamicWakeTrigger,
   getEmotionForMoodSeed,
   pickNextMoodSeed,
+  pickNextWakeArchetypeIndex,
 } from './utils/wakeContext';
 
 const EMPTY_LIP_SYNC: LipSyncWeights = {
@@ -218,6 +223,9 @@ export default function App() {
   const standbyHeardTimerRef = useRef<number | null>(null);
   const standbyAudioDotTimerRef = useRef<number | null>(null);
   const wakePendingGreetingRef = useRef(false);
+  const capturingWakeOpeningRef = useRef(false);
+  const recentWakeOpeningsRef = useRef<string[]>([]);
+  const activeWakeStyleIdxRef = useRef<number | null>(null);
   const lastMoodSeedRef = useRef<WakeMoodSeed | null>(null);
   const activeWakeMoodRef = useRef<WakeMoodSeed | null>(null);
   const lastActiveBeforeWakeRef = useRef<string | null>(null);
@@ -496,6 +504,8 @@ export default function App() {
       memoriesRef.current = scopedMemories;
       tasksRef.current = scopedTasks;
       historyRef.current = scopedHistory;
+      recentWakeOpeningsRef.current = loadRecentWakeOpenings(nextScope);
+      activeWakeStyleIdxRef.current = loadLastWakeStyleIndex(nextScope);
 
       setSettings(scopedSettings);
       setMemories(scopedMemories);
@@ -505,6 +515,9 @@ export default function App() {
 
       if (!currentUser) {
         setNeedsVoiceCodeSetup(true);
+        setVoiceCommandsOpen(false);
+        setSettingsOpen(false);
+        setMemoryOpen(false);
         setCaptionText(SETUP_REQUIRED_CAPTION);
         setVoiceSetupReady(false);
         setAuthLoading(false);
@@ -639,6 +652,20 @@ export default function App() {
         );
       } catch (err) {
         if (!cancelled) {
+          const hasLocalWake =
+            parseVoicePhraseList(scopedSettings.secretWakePhrase).length > 0;
+          const hasLocalShutdown =
+            parseVoicePhraseList(scopedSettings.secretShutdownPhrase).length > 0;
+          const fallbackConfigured =
+            Boolean(scopedSettings.voiceCodesConfigured) &&
+            hasLocalWake &&
+            hasLocalShutdown;
+
+          setNeedsVoiceCodeSetup(!fallbackConfigured);
+          if (!fallbackConfigured) {
+            setCaptionText(SETUP_REQUIRED_CAPTION);
+            setVoiceCommandsOpen(true);
+          }
           setVoiceSetupReady(true);
           showToast(
             err instanceof Error
@@ -659,6 +686,7 @@ export default function App() {
   const [signInError, setSignInError] = useState<string | null>(null);
 
   const handleSignIn = useCallback(async () => {
+    unlockAudioPlayback();
     setAuthLoading(true);
     setSignInError(null);
     try {
@@ -1123,6 +1151,13 @@ export default function App() {
             if (detected !== 'neutral') {
               setAvatarEmotion(detected);
             }
+            if (capturingWakeOpeningRef.current) {
+              capturingWakeOpeningRef.current = false;
+              recentWakeOpeningsRef.current = saveRecentWakeOpening(
+                finalTurn,
+                scopeKeyRef.current,
+              );
+            }
             appendTurn('model', finalTurn);
             liveOutputBufferRef.current = '';
           }
@@ -1156,6 +1191,8 @@ export default function App() {
           language: settingsRef.current.language,
           memories: memoriesRef.current,
           history: historyRef.current,
+          recentWakeOpenings: recentWakeOpeningsRef.current,
+          wakeStyleIndex: activeWakeStyleIdxRef.current ?? undefined,
           lastActiveAt: lastActiveBeforeWakeRef.current,
           moodSeed: wakeMood,
         })
@@ -1235,6 +1272,13 @@ export default function App() {
     const moodSeed = pickNextMoodSeed(lastMoodSeedRef.current);
     lastMoodSeedRef.current = moodSeed;
     activeWakeMoodRef.current = moodSeed;
+
+    const nextStyleIdx = pickNextWakeArchetypeIndex(
+      activeWakeStyleIdxRef.current ?? loadLastWakeStyleIndex(scopeKeyRef.current),
+    );
+    activeWakeStyleIdxRef.current = nextStyleIdx;
+    saveLastWakeStyleIndex(nextStyleIdx, scopeKeyRef.current);
+    capturingWakeOpeningRef.current = true;
 
     if (standbyHeardTimerRef.current) {
       window.clearTimeout(standbyHeardTimerRef.current);
@@ -1953,7 +1997,7 @@ export default function App() {
               Sign in to Tampi
             </h2>
             <p className="text-xs sm:text-sm text-slate-300 leading-relaxed mb-6">
-              Enter your private AI sanctuary with isolated Firestore database storage, custom voice commands, and personal neural memory.
+              Sign in first to unlock your private neural vault, then set your personal Active &amp; Shut Down voice commands.
             </p>
 
             <button
@@ -2307,6 +2351,9 @@ export default function App() {
         isFirstTimeSetup={needsVoiceCodeSetup}
         userEmail={user?.email ?? null}
         onClose={() => setVoiceCommandsOpen(false)}
+        onSignOut={() => {
+          void handleSignOut();
+        }}
         onSave={(nextWake, nextShutdown) => {
           const nextWakeList = parseVoicePhraseList(nextWake);
           const nextShutdownList = parseVoicePhraseList(nextShutdown);

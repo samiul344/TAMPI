@@ -7,7 +7,10 @@ import {
   StructuredAction,
   StudyTask,
 } from '../types/tampi';
-import { acquireUnlockedOutputAudioContext } from './wakeWord';
+import {
+  acquireUnlockedOutputAudioContext,
+  playPreSpeechHudSfx,
+} from './wakeWord';
 
 function downsampleBuffer(
   input: Float32Array,
@@ -191,7 +194,8 @@ export class GeminiLiveClient {
         }
 
         if (config.wakeTrigger) {
-          // Wait 200ms after Gemini Live onopen ('ready') for audio output readiness, then trigger Tampi to speak FIRST
+          // Wait 200ms after Gemini Live onopen ('ready') for audio output readiness,
+          // play a subtle 0.5s Stark HUD charging SFX, and trigger Tampi to speak FIRST
           await new Promise((resolve) => setTimeout(resolve, 200));
           if (
             this.isDisconnected ||
@@ -200,6 +204,7 @@ export class GeminiLiveClient {
           ) {
             return;
           }
+          playPreSpeechHudSfx();
           this.ws.send(
             JSON.stringify({
               type: 'text',

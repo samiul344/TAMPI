@@ -191,3 +191,61 @@ export function loadLastActiveAt(scopeKey = 'guest'): string | null {
 export function saveLastActiveAt(iso: string, scopeKey = 'guest'): void {
   localStorage.setItem(scopedKey(scopeKey, 'last_active_v2'), iso);
 }
+
+export function loadRecentWakeOpenings(scopeKey = 'guest'): string[] {
+  const parsed = safeParse<unknown[]>(
+    localStorage.getItem(scopedKey(scopeKey, 'wake_openings_v2')),
+    [],
+  );
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    .slice(-10);
+}
+
+export function saveRecentWakeOpening(
+  line: string,
+  scopeKey = 'guest',
+): string[] {
+  const clean = line.trim();
+  if (!clean) return loadRecentWakeOpenings(scopeKey);
+  const existing = loadRecentWakeOpenings(scopeKey).filter(
+    (item) => item.toLowerCase() !== clean.toLowerCase(),
+  );
+  const updated = [...existing, clean].slice(-10);
+  try {
+    localStorage.setItem(
+      scopedKey(scopeKey, 'wake_openings_v2'),
+      JSON.stringify(updated),
+    );
+  } catch {
+    // Ignore storage errors
+  }
+  return updated;
+}
+
+export function loadLastWakeStyleIndex(scopeKey = 'guest'): number | null {
+  try {
+    const raw = localStorage.getItem(scopedKey(scopeKey, 'wake_style_idx_v2'));
+    if (raw === null) return null;
+    const n = Number(raw);
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveLastWakeStyleIndex(
+  index: number,
+  scopeKey = 'guest',
+): void {
+  try {
+    localStorage.setItem(
+      scopedKey(scopeKey, 'wake_style_idx_v2'),
+      String(index),
+    );
+  } catch {
+    // Ignore storage errors
+  }
+}
+

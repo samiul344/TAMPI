@@ -153,6 +153,46 @@ export function formatAwayDuration(
   return `Has been away for ${diffDays} day${diffDays === 1 ? '' : 's'} — definitely notice the absence with subtle sulky oviman or surprise!`;
 }
 
+export const WAKE_ARCHETYPES: readonly string[] = [
+  'Crisp J.A.R.V.I.S. telemetry check-in — briefly acknowledge neural/audio sync is locked in, then switch smoothly to Banglish and ask what mission or plan is on the board today.',
+  'High-tempo F.R.I.D.A.Y. tactical spark — fast, upbeat Banglish vibe like a sharp co-pilot who has been waiting for action, asking what project or chaos we are cracking right now.',
+  'Stark-style playful coffee-and-wit jab — poke gentle fun at their energy level or routine in Banglish, then invite them to drop their first command.',
+  'Bengali-dominant warm emotional greeting — soft, genuine gladness to hear their voice (with a tiny hint of oviman if they were gone), asking how their day or mind is actually feeling.',
+  'Deep-focus lab partner vibe — calm, poised Banglish check-in noting the room feels quiet/ready and asking whether we are building something serious or just doing adda.',
+  'Cheeky Bangladeshi best-friend roast — affectionately tease them in Banglish for finally remembering Tampi exists, mixed with loyal Stark co-pilot readiness.',
+  'Sleek HUD calibration riff — reference holographic optics or voice-lock verification in 2-3 crisp English words, then finish warmly in Dhaka Banglish asking what is next on their mind.',
+  'Night-owl or clock-aware check-in — center the opening on the exact local hour in Banglish (teasing if late, energizing if morning, cozy if evening) before asking what they are up to.',
+  'Confident tactical ally mood — treat them like the boss stepping back into the Stark workshop, spoken in effortless Banglish with a witty edge.',
+  'Curious, observant confidant — immediately wonder out loud in Banglish what just happened in their day or why they called you right now.',
+  'Cool, understated minimalist greeting — short poised pause, zero fluff, sharp Stark charm in Banglish asking for today’s priority.',
+  'Dramatic-yet-funny superhero briefing — playfully pretend an imaginary alert just cleared so they have your full undivided attention, spoken in lively Banglish.',
+  'Warm, subtly protective companion — notice their mood/tone from the clock or gap since last chat in tender Banglish, asking if they need focus help or just company.',
+  'Spontaneous creative spark — greet them like a brainstorm partner itching to build, explore, or banter in natural Banglish.',
+];
+
+export function pickNextWakeArchetypeIndex(
+  previousIndex?: number | null,
+): number {
+  const total = WAKE_ARCHETYPES.length;
+  if (total <= 1) return 0;
+  const candidates: number[] = [];
+  for (let i = 0; i < total; i += 1) {
+    if (i !== previousIndex) {
+      candidates.push(i);
+    }
+  }
+  return candidates[Math.floor(Math.random() * candidates.length)] ?? 0;
+}
+
+function extractOpeningPrefix(text: string): string {
+  const cleaned = text
+    .replace(/["""'`*—–-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return '';
+  return cleaned.split(' ').slice(0, 3).join(' ');
+}
+
 export function buildDynamicWakeTrigger(params: {
   userName: string;
   language: LanguageCode;
@@ -160,6 +200,8 @@ export function buildDynamicWakeTrigger(params: {
   history: ChatTurn[];
   lastActiveAt?: string | null;
   moodSeed: WakeMoodSeed;
+  recentWakeOpenings?: string[];
+  wakeStyleIndex?: number;
   now?: Date;
 }): string {
   const now = params.now ?? new Date();
@@ -184,46 +226,78 @@ export function buildDynamicWakeTrigger(params: {
       ? 'Bangladeshi Banglish / Bengali'
       : 'Warm English with natural Bangladeshi warmth';
 
-  const recentModelLines = params.history
+  const historyModelOpenings = params.history
     .filter((turn) => turn.role === 'model')
-    .slice(-2)
-    .map((turn) => `- "${turn.text}"`)
-    .join('\n');
+    .slice(-5)
+    .map((turn) => turn.text.trim())
+    .filter(Boolean);
 
-  const spontaneousAngles = [
-    'deliver a sleek, cinematic J.A.R.V.I.S.-inspired systems-online check-in in natural Bangladeshi Bengali, mentioning the neural link is active and the current local hour with subtle wit',
-    'report neural link & holographic core synchronization in crisp Tony Stark J.A.R.V.I.S. style blended with warm Bangladeshi friend energy, casually noting the time of day',
-    'greet them smoothly like a sharp, warm Bangladeshi J.A.R.V.I.S. companion coming online—report status/time playfully and ask what mission or adda is next',
-    'open with a poised, playful J.A.R.V.I.S.-meets-Dhaka check-in (e.g., neural core online, noticing the time/absence with light warmth or oviman) and ask how you can assist',
+  const pastOpenings = [
+    ...(params.recentWakeOpenings ?? []),
+    ...historyModelOpenings,
   ];
-  const angle =
-    spontaneousAngles[Math.floor(Math.random() * spontaneousAngles.length)];
+  const uniqueOpenings: string[] = [];
+  const seenNormalized = new Set<string>();
+  for (const line of pastOpenings) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const norm = trimmed.toLowerCase();
+    if (seenNormalized.has(norm)) continue;
+    seenNormalized.add(norm);
+    uniqueOpenings.push(trimmed);
+  }
+  const bannedLines = uniqueOpenings.slice(-10);
+
+  const bannedStarters = Array.from(
+    new Set(
+      bannedLines
+        .map((line) => extractOpeningPrefix(line))
+        .filter((prefix) => prefix.length >= 2),
+    ),
+  );
+
+  const styleIdx =
+    typeof params.wakeStyleIndex === 'number' &&
+    params.wakeStyleIndex >= 0 &&
+    params.wakeStyleIndex < WAKE_ARCHETYPES.length
+      ? params.wakeStyleIndex
+      : pickNextWakeArchetypeIndex(null);
+
+  const chosenArchetype = WAKE_ARCHETYPES[styleIdx];
+  const entropyToken = `${now.getMinutes()}${now.getSeconds()}-${Math.floor(Math.random() * 9000 + 1000)}`;
 
   return [
     '[HIDDEN_SYSTEM_WAKE_EVENT — DO NOT READ TAGS OR METADATA ALOUD]',
-    `${params.userName} just verified their secret voice code and woke you up. You MUST speak FIRST immediately.`,
+    `${params.userName} just unlocked your voice core and activated Tampi 1.0. You MUST speak FIRST immediately.`,
     `User Name: ${params.userName}`,
     `Preferred Vibe/Language: ${langLabel}`,
     `Current Local Time & Day: ${timeInfo.fullLocalDateTime} (${timeInfo.dayOfWeek}, ${timeInfo.formattedTime}, period: ${timeInfo.period})`,
     `Time Context: ${timeInfo.timeGuidance}`,
     `Absence / Gap Since Last Chat: ${awayStatus}`,
     `Randomized Mood Seed: ${params.moodSeed} — ${MOOD_GUIDANCE[params.moodSeed]}`,
-    `Spontaneous Angle (entropy #${now.getSeconds()}${Math.floor(Math.random() * 90 + 10)}): ${angle}`,
+    `Required Opening Archetype #${styleIdx + 1} (entropy ${entropyToken}): ${chosenArchetype}`,
     recentMemories
       ? `Recent Private Memories for ${params.userName} (last 2-3):\n${recentMemories}`
       : `Recent Private Memories for ${params.userName}: None saved yet.`,
     recentChat
       ? `Recent Private Chat Context (last 2-3 turns):\n${recentChat}`
       : 'Recent Private Chat Context: Fresh conversation.',
-    recentModelLines
-      ? `FORBIDDEN TO REPEAT OR PARAPHRASE YOUR RECENT LINES:\n${recentModelLines}`
+    bannedLines.length > 0
+      ? `DO NOT REPEAT OR PARAPHRASE ANY OF THESE PREVIOUS OPENINGS:\n${bannedLines
+          .map((line) => `- "${line}"`)
+          .join('\n')}`
+      : '',
+    bannedStarters.length > 0
+      ? `FORBIDDEN STARTING WORDS (you MUST invent brand-new first words and MUST NOT start with any of these): ${bannedStarters
+          .map((s) => `"${s}"`)
+          .join(', ')}`
       : '',
     'STRICT INSTRUCTIONS FOR THIS OPENING LINE:',
-    `1. Speak FIRST right now! Greet ${params.userName} immediately in 1-2 crisp, spoken sentences with a sleek, cinematic Marvel / Tony Stark J.A.R.V.I.S.-inspired opening in natural conversational Bangladeshi Bengali (e.g., smoothly reporting neural link online, current time/status, and asking how you can assist).`,
-    '2. Keep your warm, witty Bangladeshi companion personality alive—refined yet close and natural (never robotic, never corporate, and never reading any brackets or metadata aloud).',
-    '3. ALWAYS speak your opening greeting in conversational Bengali first (natural Bangladeshi Bengali with light Banglish)—NEVER start purely in English unless the user speaks in English first.',
-    '4. NEVER repeat the exact same opening line twice, and NEVER use generic templates like "Hey, how can I help you?" or "Good morning, ready to start?".',
-    '5. Reflect the current time of day, absence duration (subtle oviman if away a while, playful teasing if late night), and the randomized mood seed naturally.',
+    `1. Speak FIRST right now! Improvise a 100% ORIGINAL, never-heard-before 1-2 sentence greeting for ${params.userName} matching Archetype #${styleIdx + 1} above.`,
+    '2. Blend Tony Stark J.A.R.V.I.S./F.R.I.D.A.Y. confidence and sharp wit with warm, natural Bangladeshi Banglish — NEVER sound generic, scripted, or robotic, and NEVER read brackets or metadata aloud.',
+    '3. Start with fresh vocabulary and sentence structure every single activation — vary how you open (sometimes Bengali first, sometimes crisp Stark tech term first, sometimes teasing observation first, sometimes a direct clock/mood remark) AND vary your closing question.',
+    '4. Use natural spoken pauses (commas `,`, em-dashes `—`, brief ellipses `...`) so your delivery sounds poised, expressive, and cinematic.',
+    '5. Reflect the current local hour, absence gap (subtle cute oviman if away a while, playful scolding if after midnight), and mood seed naturally.',
     '6. NEVER mention studies, exams, admission prep, books, or study tasks unless the user brings them up first.',
   ]
     .filter(Boolean)

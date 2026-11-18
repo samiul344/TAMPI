@@ -2,12 +2,13 @@ import React, { useEffect, useState } from 'react';
 import {
   Check,
   Lock,
+  LogOut,
   Mic,
   ShieldCheck,
   Sparkles,
   X,
 } from 'lucide-react';
-import { parseVoicePhraseList } from '../utils/wakeWord';
+import { parseVoicePhraseList, unlockAudioPlayback } from '../utils/wakeWord';
 
 interface VoiceCommandsModalProps {
   open: boolean;
@@ -18,6 +19,7 @@ interface VoiceCommandsModalProps {
   userEmail: string | null;
   onClose: () => void;
   onSave: (nextWakePhrase: string, nextShutdownPhrase: string) => void;
+  onSignOut?: () => void;
 }
 
 export const VoiceCommandsModal: React.FC<VoiceCommandsModalProps> = ({
@@ -29,6 +31,7 @@ export const VoiceCommandsModal: React.FC<VoiceCommandsModalProps> = ({
   userEmail,
   onClose,
   onSave,
+  onSignOut,
 }) => {
   const [wakeDraft, setWakeDraft] = useState(secretWakePhrase);
   const [shutdownDraft, setShutdownDraft] = useState(secretShutdownPhrase);
@@ -48,15 +51,16 @@ export const VoiceCommandsModal: React.FC<VoiceCommandsModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    unlockAudioPlayback();
     const cleanWake = wakeDraft.trim();
     const cleanShutdown = shutdownDraft.trim();
 
     if (parseVoicePhraseList(cleanWake).length === 0) {
-      setValidationError('Please enter at least one Wake Phrase.');
+      setValidationError('Please enter at least one Active (Wake) Command.');
       return;
     }
     if (parseVoicePhraseList(cleanShutdown).length === 0) {
-      setValidationError('Please enter at least one Off/Sleep Phrase.');
+      setValidationError('Please enter at least one Shut Down Command.');
       return;
     }
 
@@ -74,7 +78,7 @@ export const VoiceCommandsModal: React.FC<VoiceCommandsModalProps> = ({
     >
       <form
         onSubmit={handleSubmit}
-        className="flex w-full max-w-[500px] flex-col rounded-2xl bg-[#0d1320] border border-white/12 shadow-2xl"
+        className="flex w-full max-w-[500px] flex-col rounded-2xl bg-[#0d1320] border border-cyan-400/25 shadow-2xl"
       >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-white/10 px-6 py-4">
@@ -86,24 +90,26 @@ export const VoiceCommandsModal: React.FC<VoiceCommandsModalProps> = ({
             <div>
               <h2 className="font-display text-base font-semibold text-white">
                 {isFirstTimeSetup
-                  ? 'Set Your Personal Voice Codes'
+                  ? 'Set Your Active & Shut Down Commands'
                   : 'Voice Commands'}
               </h2>
               <p className="text-xs text-slate-400">
                 {isFirstTimeSetup
-                  ? 'Create your personal Wake & Off/Sleep phrases to activate Standby Mode'
-                  : 'Set your personal wake & off/sleep voice phrases'}
+                  ? 'Step 2: Choose your voice codes to activate and shut down Tampi'
+                  : 'Update your personal Active (Wake) & Shut Down commands'}
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close voice commands"
-            className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-white/10 hover:text-white transition-colors"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          {!isFirstTimeSetup && (
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close voice commands"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-white/10 hover:text-white transition-colors"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
 
         {/* Body */}
@@ -112,7 +118,7 @@ export const VoiceCommandsModal: React.FC<VoiceCommandsModalProps> = ({
             <div className="flex items-start gap-2.5 rounded-xl bg-cyan-500/10 border border-cyan-400/30 px-3.5 py-2.5 text-xs text-cyan-100">
               <Sparkles className="h-4 w-4 text-cyan-300 shrink-0 mt-0.5" />
               <span>
-                First-time setup: Tampi waits in Standby until you save your own Wake Phrase and Off/Sleep Phrase.
+                You are signed in! Set your private <strong>Active Command</strong> (to wake Tampi) and <strong>Shut Down Command</strong> (to put Tampi back to sleep).
               </span>
             </div>
           )}
@@ -134,39 +140,40 @@ export const VoiceCommandsModal: React.FC<VoiceCommandsModalProps> = ({
             <Lock className="h-3.5 w-3.5 text-slate-500 shrink-0" />
           </div>
 
-          {/* Start Command (Wake Phrase) */}
+          {/* Start Command (Active / Wake Phrase) */}
           <div className="space-y-2">
             <label
               htmlFor="voice-cmd-wake"
               className="block text-sm font-semibold text-slate-200"
             >
-              Wake Phrase (Start Command)
+              Active Command (Wake Phrase)
             </label>
             <input
               id="voice-cmd-wake"
               type="text"
               autoComplete="off"
               spellCheck={false}
+              autoFocus={isFirstTimeSetup}
               value={wakeDraft}
               onChange={(e) => {
                 setWakeDraft(e.target.value);
                 if (validationError) setValidationError(null);
               }}
-              placeholder="Enter your custom wake phrase (comma or / separated)"
+              placeholder="e.g. Tampi active, Wake up (comma or / separated)"
               className="h-10 w-full rounded-xl bg-[#080c15] border border-white/12 px-3 text-xs text-slate-200 placeholder:text-slate-500 focus:border-cyan-400/50 focus:outline-none"
             />
             <p className="text-[11px] text-slate-400">
-              Speak this while Tampi is sleeping to wake her up. Separate multiple phrases with commas or /.
+              Speak this while Tampi is in standby to boot &amp; activate her. Separate multiple commands with commas or /.
             </p>
           </div>
 
-          {/* End Command (Off/Sleep Phrase) */}
+          {/* End Command (Shut Down / Sleep Phrase) */}
           <div className="space-y-2">
             <label
               htmlFor="voice-cmd-shutdown"
               className="block text-sm font-semibold text-slate-200"
             >
-              Off/Sleep Phrase (End Command)
+              Shut Down Command (Sleep / Off Phrase)
             </label>
             <input
               id="voice-cmd-shutdown"
@@ -178,11 +185,11 @@ export const VoiceCommandsModal: React.FC<VoiceCommandsModalProps> = ({
                 setShutdownDraft(e.target.value);
                 if (validationError) setValidationError(null);
               }}
-              placeholder="Enter your custom sleep phrase (comma or / separated)"
+              placeholder="e.g. System off, Go to sleep (comma or / separated)"
               className="h-10 w-full rounded-xl bg-[#080c15] border border-white/12 px-3 text-xs text-slate-200 placeholder:text-slate-500 focus:border-amber-400/50 focus:outline-none"
             />
             <p className="text-[11px] text-slate-400">
-              Speak this as a standalone command during a live call to put Tampi back into sleeping standby mode. Separate multiple phrases with commas or /.
+              Speak this as a standalone command during a live call to shut down &amp; return Tampi to standby. Separate multiple commands with commas or /.
             </p>
           </div>
 
@@ -194,21 +201,39 @@ export const VoiceCommandsModal: React.FC<VoiceCommandsModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-2.5 border-t border-white/10 px-6 py-3.5">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-xl bg-white/[0.06] border border-white/10 px-4 py-2 text-xs font-medium text-slate-300 hover:bg-white/12 hover:text-white transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            className="flex items-center gap-1.5 rounded-xl bg-cyan-500 px-5 py-2 text-xs font-semibold text-slate-950 hover:bg-cyan-400 transition-colors"
-          >
-            <Check className="h-3.5 w-3.5" />
-            <span>Save Commands</span>
-          </button>
+        <div className="flex items-center justify-between gap-2.5 border-t border-white/10 px-6 py-3.5">
+          {isFirstTimeSetup && onSignOut ? (
+            <button
+              type="button"
+              onClick={onSignOut}
+              className="flex items-center gap-1.5 rounded-xl bg-white/[0.04] border border-white/10 px-3.5 py-2 text-xs font-medium text-slate-400 hover:bg-white/10 hover:text-slate-200 transition-colors"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              <span>Switch Account</span>
+            </button>
+          ) : (
+            <span />
+          )}
+          <div className="flex items-center gap-2.5">
+            {!isFirstTimeSetup && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-xl bg-white/[0.06] border border-white/10 px-4 py-2 text-xs font-medium text-slate-300 hover:bg-white/12 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+            )}
+            <button
+              type="submit"
+              className="flex items-center gap-1.5 rounded-xl bg-cyan-500 px-5 py-2 text-xs font-semibold text-slate-950 hover:bg-cyan-400 transition-colors cursor-pointer"
+            >
+              <Check className="h-3.5 w-3.5" />
+              <span>
+                {isFirstTimeSetup ? 'Save & Arm Tampi' : 'Save Commands'}
+              </span>
+            </button>
+          </div>
         </div>
       </form>
     </div>

@@ -595,152 +595,362 @@ export function unlockAudioPlayback(): void {
   }
 }
 
+function getOrInitPlaybackContext(): {
+  ctx: AudioContext;
+  ephemeral: boolean;
+} | null {
+  if (sharedOutputCtx && sharedOutputCtx.state !== 'closed') {
+    if (sharedOutputCtx.state === 'suspended') {
+      void sharedOutputCtx.resume();
+    }
+    return { ctx: sharedOutputCtx, ephemeral: false };
+  }
+  const created = createOutputAudioContext();
+  if (!created) return null;
+  sharedOutputCtx = created;
+  if (sharedOutputCtx.state === 'suspended') {
+    void sharedOutputCtx.resume();
+  }
+  return { ctx: sharedOutputCtx, ephemeral: false };
+}
+
+function createMasterSfxBus(
+  ctx: AudioContext,
+  level: number,
+  now: number,
+): { input: GainNode; dispose: () => void } {
+  const compressor = ctx.createDynamicsCompressor();
+  compressor.threshold.setValueAtTime(-14, now);
+  compressor.knee.setValueAtTime(18, now);
+  compressor.ratio.setValueAtTime(4, now);
+  compressor.attack.setValueAtTime(0.004, now);
+  compressor.release.setValueAtTime(0.18, now);
+
+  const masterGain = ctx.createGain();
+  masterGain.gain.setValueAtTime(level, now);
+
+  const dry = ctx.createGain();
+  dry.gain.setValueAtTime(0.88, now);
+
+  const delay = ctx.createDelay(0.5);
+  delay.delayTime.setValueAtTime(0.115, now);
+
+  const delayFilter = ctx.createBiquadFilter();
+  delayFilter.type = 'lowpass';
+  delayFilter.frequency.setValueAtTime(2800, now);
+
+  const feedback = ctx.createGain();
+  feedback.gain.setValueAtTime(0.24, now);
+
+  const wet = ctx.createGain();
+  wet.gain.setValueAtTime(0.28, now);
+
+  masterGain.connect(dry);
+  dry.connect(compressor);
+
+  masterGain.connect(delay);
+  delay.connect(delayFilter);
+  delayFilter.connect(feedback);
+  feedback.connect(delay);
+  delayFilter.connect(wet);
+  wet.connect(compressor);
+
+  compressor.connect(ctx.destination);
+
+  return {
+    input: masterGain,
+    dispose: () => {
+      try {
+        masterGain.disconnect();
+        dry.disconnect();
+        delay.disconnect();
+        delayFilter.disconnect();
+        feedback.disconnect();
+        wet.disconnect();
+        compressor.disconnect();
+      } catch {
+        // ignore disconnect errors
+      }
+    },
+  };
+}
+
+function connectWithPan(
+  ctx: AudioContext,
+  source: AudioNode,
+  dest: AudioNode,
+  panValue: number,
+  now: number,
+): void {
+  if (typeof ctx.createStereoPanner === 'function') {
+    const panner = ctx.createStereoPanner();
+    panner.pan.setValueAtTime(Math.max(-1, Math.min(1, panValue)), now);
+    source.connect(panner);
+    panner.connect(dest);
+  } else {
+    source.connect(dest);
+  }
+}
+
+function createNoiseAirBuffer(ctx: AudioContext, durationSec: number): AudioBuffer {
+  const sampleRate = ctx.sampleRate || 24000;
+  const length = Math.max(1, Math.floor(sampleRate * durationSec));
+  const buffer = ctx.createBuffer(1, length, sampleRate);
+  const data = buffer.getChannelData(0);
+  let last = 0;
+  for (let i = 0; i < length; i++) {
+    const white = Math.random() * 2 - 1;
+    // Soft pink-ish tilt for silky holographic air texture
+    last = (last + 0.08 * white) / 1.08;
+    data[i] = last * 2.6 + white * 0.25;
+  }
+  return buffer;
+}
+
 /**
- * Plays a crisp 1.5-second multi-layered Iron Man / J.A.R.V.I.S. power-up hum + harmonic chime via Web Audio API.
+ * Plays a crisp 0.5-second subtle Stark HUD charging / neural-link crystal shimmer
+ * right before Tampi begins speaking her opening line.
+ */
+export function playPreSpeechHudSfx(): void {
+  try {
+    const resolved = getOrInitPlaybackContext();
+    if (!resolved) return;
+    const { ctx } = resolved;
+    const now = ctx.currentTime + 0.01;
+
+    const bus = createMasterSfxBus(ctx, 0.2, now);
+
+    // 1. Silky 0.42s holographic air shimmer
+    const airSrc = ctx.createBufferSource();
+    airSrc.buffer = createNoiseAirBuffer(ctx, 0.45);
+    const airFilter = ctx.createBiquadFilter();
+    airFilter.type = 'bandpass';
+    airFilter.Q.value = 3.8;
+    airFilter.frequency.setValueAtTime(650, now);
+    airFilter.frequency.exponentialRampToValueAtTime(2800, now + 0.34);
+    const airGain = ctx.createGain();
+    airGain.gain.setValueAtTime(0.001, now);
+    airGain.gain.linearRampToValueAtTime(0.18, now + 0.09);
+    airGain.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+    airSrc.connect(airFilter);
+    airFilter.connect(airGain);
+    airGain.connect(bus.input);
+    airSrc.start(now);
+    airSrc.stop(now + 0.44);
+
+    // 2. Smooth neural capacitor sweep (360Hz -> 1140Hz)
+    const chargeOsc = ctx.createOscillator();
+    const chargeGain = ctx.createGain();
+    chargeOsc.type = 'sine';
+    chargeOsc.frequency.setValueAtTime(360, now);
+    chargeOsc.frequency.exponentialRampToValueAtTime(1140, now + 0.32);
+    chargeGain.gain.setValueAtTime(0.001, now);
+    chargeGain.gain.linearRampToValueAtTime(0.28, now + 0.07);
+    chargeGain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+    chargeOsc.connect(chargeGain);
+    chargeGain.connect(bus.input);
+    chargeOsc.start(now);
+    chargeOsc.stop(now + 0.42);
+
+    // 3. Crystalline dual stereo telemetry ping (A5 -> E6)
+    const ping = (
+      freq: number,
+      offset: number,
+      dur: number,
+      peak: number,
+      pan: number,
+    ) => {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, now + offset);
+      g.gain.setValueAtTime(0.001, now + offset);
+      g.gain.linearRampToValueAtTime(peak, now + offset + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.001, now + offset + dur);
+      osc.connect(g);
+      connectWithPan(ctx, g, bus.input, pan, now);
+      osc.start(now + offset);
+      osc.stop(now + offset + dur + 0.02);
+    };
+
+    ping(880.0, 0.14, 0.22, 0.24, -0.25);
+    ping(1318.51, 0.24, 0.24, 0.26, 0.25);
+
+    window.setTimeout(() => {
+      bus.dispose();
+    }, 950);
+  } catch {
+    // Ignore audio context restrictions
+  }
+}
+
+/**
+ * Plays a multi-stage theatrical Iron Man / J.A.R.V.I.S. / F.R.I.D.A.Y.
+ * suit-up & holographic neural-core activation soundscape.
  */
 export function playWakeAuthChime(): void {
   try {
-    const AudioCtx =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext })
-        .webkitAudioContext;
-    if (!AudioCtx) return;
+    const resolved = getOrInitPlaybackContext();
+    if (!resolved) return;
+    const { ctx } = resolved;
+    const now = ctx.currentTime + 0.01;
 
-    const ctx = new AudioCtx();
-    void ctx.resume();
-    const now = ctx.currentTime;
+    const bus = createMasterSfxBus(ctx, 0.34, now);
 
-    const masterGain = ctx.createGain();
-    masterGain.gain.setValueAtTime(0.22, now);
-    masterGain.connect(ctx.destination);
+    // Layer 1: Arc-reactor sub-bass ignition thump (142Hz -> 44Hz)
+    const subThump = ctx.createOscillator();
+    const subThumpGain = ctx.createGain();
+    subThump.type = 'sine';
+    subThump.frequency.setValueAtTime(142, now);
+    subThump.frequency.exponentialRampToValueAtTime(44, now + 0.34);
+    subThumpGain.gain.setValueAtTime(0.001, now);
+    subThumpGain.gain.linearRampToValueAtTime(0.55, now + 0.025);
+    subThumpGain.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+    subThump.connect(subThumpGain);
+    subThumpGain.connect(bus.input);
+    subThump.start(now);
+    subThump.stop(now + 0.44);
 
-    // Layer 1: Deep holographic chamber power-up hum (low-pass filtered sawtooth + sub-sine)
-    const humFilter = ctx.createBiquadFilter();
-    humFilter.type = 'lowpass';
-    humFilter.frequency.setValueAtTime(140, now);
-    humFilter.frequency.exponentialRampToValueAtTime(760, now + 0.55);
-    humFilter.frequency.exponentialRampToValueAtTime(240, now + 1.45);
-    humFilter.Q.value = 3.2;
-    humFilter.connect(masterGain);
+    // Layer 2: Holographic glass materialization air-whoosh (resonant sweeping noise)
+    const noiseSrc = ctx.createBufferSource();
+    noiseSrc.buffer = createNoiseAirBuffer(ctx, 0.85);
+    const airBand = ctx.createBiquadFilter();
+    airBand.type = 'bandpass';
+    airBand.Q.value = 4.6;
+    airBand.frequency.setValueAtTime(260, now + 0.02);
+    airBand.frequency.exponentialRampToValueAtTime(3400, now + 0.38);
+    airBand.frequency.exponentialRampToValueAtTime(920, now + 0.78);
+    const airGain = ctx.createGain();
+    airGain.gain.setValueAtTime(0.001, now + 0.02);
+    airGain.gain.linearRampToValueAtTime(0.32, now + 0.16);
+    airGain.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+    noiseSrc.connect(airBand);
+    airBand.connect(airGain);
+    airGain.connect(bus.input);
+    noiseSrc.start(now + 0.02);
+    noiseSrc.stop(now + 0.82);
 
-    const subOsc = ctx.createOscillator();
-    const subGain = ctx.createGain();
-    subOsc.type = 'sine';
-    subOsc.frequency.setValueAtTime(62, now);
-    subOsc.frequency.exponentialRampToValueAtTime(146.83, now + 0.65);
-    subOsc.frequency.exponentialRampToValueAtTime(110.0, now + 1.45);
-    subGain.gain.setValueAtTime(0.001, now);
-    subGain.gain.linearRampToValueAtTime(0.42, now + 0.14);
-    subGain.gain.setValueAtTime(0.35, now + 0.72);
-    subGain.gain.exponentialRampToValueAtTime(0.001, now + 1.48);
-    subOsc.connect(subGain);
-    subGain.connect(masterGain);
-    subOsc.start(now);
-    subOsc.stop(now + 1.5);
+    // Layer 3: Deep Stark reactor turbine rise (warm low-passed sawtooth + sub harmonic)
+    const reactorFilter = ctx.createBiquadFilter();
+    reactorFilter.type = 'lowpass';
+    reactorFilter.frequency.setValueAtTime(180, now);
+    reactorFilter.frequency.exponentialRampToValueAtTime(1450, now + 0.48);
+    reactorFilter.frequency.exponentialRampToValueAtTime(420, now + 1.15);
+    reactorFilter.Q.value = 2.8;
+    reactorFilter.connect(bus.input);
 
     const turbineOsc = ctx.createOscillator();
     const turbineGain = ctx.createGain();
     turbineOsc.type = 'sawtooth';
-    turbineOsc.frequency.setValueAtTime(92, now);
-    turbineOsc.frequency.exponentialRampToValueAtTime(220, now + 0.62);
-    turbineOsc.frequency.exponentialRampToValueAtTime(164.81, now + 1.42);
-    turbineGain.gain.setValueAtTime(0.001, now);
-    turbineGain.gain.linearRampToValueAtTime(0.24, now + 0.18);
-    turbineGain.gain.exponentialRampToValueAtTime(0.001, now + 1.45);
+    turbineOsc.frequency.setValueAtTime(73.42, now + 0.03); // D2
+    turbineOsc.frequency.exponentialRampToValueAtTime(146.83, now + 0.42); // D3
+    turbineOsc.frequency.exponentialRampToValueAtTime(110.0, now + 1.12);
+    turbineGain.gain.setValueAtTime(0.001, now + 0.03);
+    turbineGain.gain.linearRampToValueAtTime(0.22, now + 0.14);
+    turbineGain.gain.exponentialRampToValueAtTime(0.001, now + 1.14);
     turbineOsc.connect(turbineGain);
-    turbineGain.connect(humFilter);
-    turbineOsc.start(now);
-    turbineOsc.stop(now + 1.48);
+    turbineGain.connect(reactorFilter);
+    turbineOsc.start(now + 0.03);
+    turbineOsc.stop(now + 1.16);
 
-    // Layer 2: Telemetry lock-in frequency sweep + ring-lock micro-ticks
-    const sweepOsc = ctx.createOscillator();
-    const sweepGain = ctx.createGain();
-    sweepOsc.type = 'sine';
-    sweepOsc.frequency.setValueAtTime(440, now + 0.04);
-    sweepOsc.frequency.exponentialRampToValueAtTime(1174.66, now + 0.34);
-    sweepGain.gain.setValueAtTime(0.001, now + 0.04);
-    sweepGain.gain.linearRampToValueAtTime(0.45, now + 0.09);
-    sweepGain.gain.exponentialRampToValueAtTime(0.001, now + 0.38);
-    sweepOsc.connect(sweepGain);
-    sweepGain.connect(masterGain);
-    sweepOsc.start(now + 0.04);
-    sweepOsc.stop(now + 0.4);
-
-    // Layer 3: Harmonic J.A.R.V.I.S. verification chime cascade (D5 -> A5 -> D6 -> F#6 -> A6)
-    const playTone = (
+    // Layer 4: HUD stereo reticle targeting chirps (pan alternating left/right)
+    const playChirp = (
       freq: number,
-      startOffset: number,
-      duration: number,
+      offset: number,
+      dur: number,
       peak: number,
-      type: OscillatorType = 'sine',
+      pan: number,
     ) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.type = type;
-      osc.frequency.setValueAtTime(freq, now + startOffset);
-      gain.gain.setValueAtTime(0.001, now + startOffset);
-      gain.gain.linearRampToValueAtTime(peak, now + startOffset + 0.015);
-      gain.gain.exponentialRampToValueAtTime(
-        0.001,
-        now + startOffset + duration,
-      );
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + offset);
+      osc.frequency.exponentialRampToValueAtTime(freq * 1.12, now + offset + dur);
+      gain.gain.setValueAtTime(0.001, now + offset);
+      gain.gain.linearRampToValueAtTime(peak, now + offset + 0.008);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + dur);
       osc.connect(gain);
-      gain.connect(masterGain);
-      osc.start(now + startOffset);
-      osc.stop(now + startOffset + duration + 0.02);
+      connectWithPan(ctx, gain, bus.input, pan, now);
+      osc.start(now + offset);
+      osc.stop(now + offset + dur + 0.015);
     };
 
-    // Rapid ring lock-in blips
-    playTone(1318.51, 0.14, 0.07, 0.18, 'triangle');
-    playTone(1567.98, 0.24, 0.07, 0.2, 'triangle');
-    playTone(1975.53, 0.34, 0.09, 0.22, 'triangle');
+    playChirp(1318.51, 0.09, 0.055, 0.16, -0.55); // E6 L
+    playChirp(1760.0, 0.16, 0.055, 0.18, 0.55); // A6 R
+    playChirp(2349.32, 0.23, 0.06, 0.2, -0.35); // D7 L
+    playChirp(2959.96, 0.3, 0.075, 0.22, 0.35); // F#7 R
 
-    // Resonant activation chord as rings lock into position
-    playTone(587.33, 0.38, 0.85, 0.38, 'sine');
-    playTone(880.0, 0.42, 0.9, 0.42, 'triangle');
-    playTone(1174.66, 0.46, 0.92, 0.48, 'sine');
-    playTone(1479.98, 0.52, 0.86, 0.32, 'sine');
-    playTone(1760.0, 0.58, 0.85, 0.34, 'sine');
-    playTone(2349.32, 0.65, 0.78, 0.18, 'sine');
+    // Layer 5: Lush detuned J.A.R.V.I.S. Lydian activation chord (D5 - A5 - E6 - F#6)
+    const chordFilter = ctx.createBiquadFilter();
+    chordFilter.type = 'lowpass';
+    chordFilter.frequency.setValueAtTime(4200, now + 0.32);
+    chordFilter.frequency.exponentialRampToValueAtTime(1600, now + 1.25);
+    chordFilter.connect(bus.input);
+
+    const playDetunedNote = (
+      freq: number,
+      offset: number,
+      dur: number,
+      peak: number,
+      pan: number,
+    ) => {
+      for (const detuneCents of [-7, 7]) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = detuneCents < 0 ? 'sine' : 'triangle';
+        osc.frequency.setValueAtTime(freq, now + offset);
+        osc.detune.setValueAtTime(detuneCents, now + offset);
+        gain.gain.setValueAtTime(0.001, now + offset);
+        gain.gain.linearRampToValueAtTime(peak * 0.55, now + offset + 0.025);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + offset + dur);
+        osc.connect(gain);
+        connectWithPan(
+          ctx,
+          gain,
+          chordFilter,
+          detuneCents < 0 ? pan - 0.18 : pan + 0.18,
+          now,
+        );
+        osc.start(now + offset);
+        osc.stop(now + offset + dur + 0.02);
+      }
+    };
+
+    playDetunedNote(587.33, 0.34, 0.85, 0.28, 0); // D5
+    playDetunedNote(880.0, 0.38, 0.88, 0.3, -0.2); // A5
+    playDetunedNote(1318.51, 0.42, 0.9, 0.28, 0.2); // E6 (add9 shimmer)
+    playDetunedNote(1479.98, 0.47, 0.85, 0.22, 0); // F#6
 
     window.setTimeout(() => {
-      void ctx.close();
-    }, 1650);
+      bus.dispose();
+    }, 1850);
   } catch {
     // Ignore audio context restrictions if blocked
   }
 }
 
 /**
- * Plays a sleek descending sci-fi power-down chime via Web Audio API.
+ * Plays a sleek spatial descending sci-fi power-down chime via Web Audio API.
  */
 export function playShutdownChime(): void {
   try {
-    const AudioCtx =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext })
-        .webkitAudioContext;
-    if (!AudioCtx) return;
+    const resolved = getOrInitPlaybackContext();
+    if (!resolved) return;
+    const { ctx } = resolved;
+    const now = ctx.currentTime + 0.01;
 
-    const ctx = new AudioCtx();
-    void ctx.resume();
-    const now = ctx.currentTime;
+    const bus = createMasterSfxBus(ctx, 0.24, now);
 
-    const masterGain = ctx.createGain();
-    masterGain.gain.setValueAtTime(0.18, now);
-    masterGain.connect(ctx.destination);
-
-    // Stage 1: Descending chime cascade (A5 -> E5 -> A4)
     const playStep = (
       freq: number,
       startOffset: number,
       duration: number,
       peak: number,
-      type: OscillatorType = 'sine',
+      pan: number,
     ) => {
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      osc.type = type;
+      osc.type = 'triangle';
       osc.frequency.setValueAtTime(freq, now + startOffset);
       gain.gain.setValueAtTime(0.001, now + startOffset);
       gain.gain.linearRampToValueAtTime(peak, now + startOffset + 0.015);
@@ -749,32 +959,31 @@ export function playShutdownChime(): void {
         now + startOffset + duration,
       );
       osc.connect(gain);
-      gain.connect(masterGain);
+      connectWithPan(ctx, gain, bus.input, pan, now);
       osc.start(now + startOffset);
       osc.stop(now + startOffset + duration + 0.02);
     };
 
-    playStep(880.0, 0.0, 0.22, 0.52, 'triangle');
-    playStep(659.25, 0.09, 0.26, 0.46, 'sine');
-    playStep(440.0, 0.19, 0.38, 0.5, 'sine');
+    playStep(1174.66, 0.0, 0.22, 0.34, 0.3);
+    playStep(880.0, 0.09, 0.26, 0.34, -0.25);
+    playStep(587.33, 0.19, 0.42, 0.38, 0);
 
-    // Stage 2: Smooth sci-fi core power-down frequency sweep (520Hz -> 130Hz)
     const sweepOsc = ctx.createOscillator();
     const sweepGain = ctx.createGain();
     sweepOsc.type = 'sine';
-    sweepOsc.frequency.setValueAtTime(520.0, now + 0.12);
-    sweepOsc.frequency.exponentialRampToValueAtTime(130.0, now + 0.62);
-    sweepGain.gain.setValueAtTime(0.001, now + 0.12);
-    sweepGain.gain.linearRampToValueAtTime(0.45, now + 0.18);
-    sweepGain.gain.exponentialRampToValueAtTime(0.001, now + 0.65);
+    sweepOsc.frequency.setValueAtTime(520.0, now + 0.1);
+    sweepOsc.frequency.exponentialRampToValueAtTime(95.0, now + 0.68);
+    sweepGain.gain.setValueAtTime(0.001, now + 0.1);
+    sweepGain.gain.linearRampToValueAtTime(0.38, now + 0.16);
+    sweepGain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
     sweepOsc.connect(sweepGain);
-    sweepGain.connect(masterGain);
-    sweepOsc.start(now + 0.12);
-    sweepOsc.stop(now + 0.67);
+    sweepGain.connect(bus.input);
+    sweepOsc.start(now + 0.1);
+    sweepOsc.stop(now + 0.72);
 
     window.setTimeout(() => {
-      void ctx.close();
-    }, 900);
+      bus.dispose();
+    }, 1250);
   } catch {
     // Ignore audio context restrictions if blocked
   }
