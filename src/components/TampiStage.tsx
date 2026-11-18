@@ -1944,13 +1944,19 @@ export const TampiStage: React.FC<TampiStageProps> = ({
       allowJsonGltf: boolean,
     ): Promise<ArrayBuffer> => {
       activeAbort = new AbortController();
-      const timeoutId = window.setTimeout(() => activeAbort?.abort(), 28000);
+      let timeoutId = window.setTimeout(() => activeAbort?.abort(), 45000);
+      const resetStallTimer = () => {
+        window.clearTimeout(timeoutId);
+        timeoutId = window.setTimeout(() => activeAbort?.abort(), 45000);
+      };
 
       try {
-        const res = await fetch(urlToLoad, {
-          signal: activeAbort.signal,
-          cache: urlToLoad.startsWith('blob:') ? 'no-store' : 'default',
-        });
+        const res = await fetch(
+          urlToLoad,
+          urlToLoad.startsWith('blob:')
+            ? { signal: activeAbort.signal }
+            : { signal: activeAbort.signal, cache: 'default' },
+        );
 
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`);
@@ -1965,12 +1971,17 @@ export const TampiStage: React.FC<TampiStageProps> = ({
         const expectedTotal = totalHeader ? Number(totalHeader) : 0;
 
         let buffer: ArrayBuffer;
-        if (res.body && typeof res.body.getReader === 'function') {
+        if (
+          !urlToLoad.startsWith('blob:') &&
+          res.body &&
+          typeof res.body.getReader === 'function'
+        ) {
           const reader = res.body.getReader();
           const chunks: Uint8Array[] = [];
           let received = 0;
 
           while (true) {
+            resetStallTimer();
             const { done, value } = await reader.read();
             if (done) break;
             if (cancelled) {
@@ -2039,6 +2050,7 @@ export const TampiStage: React.FC<TampiStageProps> = ({
 
     void (async () => {
       let lastReason = 'Network load or GLTF parse failure';
+      let customFailureReason = '';
 
       for (let i = 0; i < candidates.length; i++) {
         if (cancelled) return;
@@ -2062,7 +2074,7 @@ export const TampiStage: React.FC<TampiStageProps> = ({
           handleParsedGltf(gltf);
           if (isCustomPrimary && i > 0) {
             glbErrorCbRef.current?.(
-              'Custom avatar could not load — restored built-in Tampi.',
+              `Custom avatar failed (${customFailureReason || 'invalid format'}) — restored built-in Tampi.`,
             );
           }
           return;
@@ -2070,6 +2082,9 @@ export const TampiStage: React.FC<TampiStageProps> = ({
           if (cancelled) return;
           lastReason =
             err instanceof Error ? err.message : 'Network or parse failure';
+          if (isCustomCandidate) {
+            customFailureReason = lastReason;
+          }
         }
       }
 

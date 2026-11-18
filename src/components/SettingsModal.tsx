@@ -195,7 +195,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <input
                 ref={vrmInputRef}
                 type="file"
-                accept=".vrm"
                 onChange={handleVrmFileSelect}
                 className="hidden"
               />

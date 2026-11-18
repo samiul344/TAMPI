@@ -52,6 +52,16 @@ export async function saveVrmToIndexedDb(file: File): Promise<{
   blobUrl: string;
 }> {
   const buffer = await file.arrayBuffer();
+  if (buffer.byteLength < 1024) {
+    throw new Error('Selected file is too small or not a valid .vrm / .glb 3D model.');
+  }
+  const view = new DataView(buffer);
+  const magic = view.getUint32(0, true);
+  const isGlbBinary = magic === 0x46546c67; // 'glTF'
+  if (!isGlbBinary && !/\.gltf$/i.test(file.name)) {
+    throw new Error('Please choose a valid .vrm or .glb 3D avatar file.');
+  }
+
   const db = await openDb();
   const record: StoredVrmRecord = {
     id: ACTIVE_KEY,
