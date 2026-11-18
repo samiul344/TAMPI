@@ -6,6 +6,10 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { AssistantState, AvatarEmotion, LipSyncWeights } from '../types/tampi';
+import {
+  DEFAULT_BUILTIN_VRM_URL,
+  REMOTE_FALLBACK_VRM_URL,
+} from '../utils/vrmStorage';
 
 interface TampiStageProps {
   assistantState: AssistantState;
@@ -598,7 +602,9 @@ export const TampiStage: React.FC<TampiStageProps> = ({
     renderer.setPixelRatio(
       isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2),
     );
-    renderer.setSize(container.clientWidth, container.clientHeight);
+    const initWidth = Math.max(1, container.clientWidth);
+    const initHeight = Math.max(1, container.clientHeight);
+    renderer.setSize(initWidth, initHeight);
     renderer.shadowMap.enabled = !isSoftwareGl;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(renderer.domElement);
@@ -631,7 +637,7 @@ export const TampiStage: React.FC<TampiStageProps> = ({
     // Chest-up portrait camera + damped OrbitControls
     const camera = new THREE.PerspectiveCamera(
       34,
-      container.clientWidth / container.clientHeight,
+      initWidth / initHeight,
       0.1,
       50,
     );
@@ -965,8 +971,8 @@ export const TampiStage: React.FC<TampiStageProps> = ({
     // Resize listener
     const handleResize = () => {
       if (!container) return;
-      const w = container.clientWidth;
-      const h = container.clientHeight;
+      const w = Math.max(1, container.clientWidth);
+      const h = Math.max(1, container.clientHeight);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
@@ -1726,7 +1732,9 @@ export const TampiStage: React.FC<TampiStageProps> = ({
     };
   }, []);
 
-  // Load custom IndexedDB .vrm, custom URL, or permanent built-in /tampi.vrm
+  // Load custom IndexedDB .vrm / custom URL (only if explicitly set), or multi-source built-in fallback chain:
+  // 1) /tampi.vrm (resolved via import.meta.env.BASE_URL)
+  // 2) https://raw.githubusercontent.com/samiul344/TAMPI/main/public/tampi.vrm
   useEffect(() => {
     const slot = customModelSlotRef.current;
     if (!slot) return;
@@ -1750,174 +1758,331 @@ export const TampiStage: React.FC<TampiStageProps> = ({
       setHasLoadedAvatar(false);
     };
 
-    const activeUrl = (vrmUrl || customGlbUrl || '/tampi.vrm').trim();
-
-    let cancelled = false;
-    setGlbLoading(true);
-
-    const loadModelUrl = (urlToLoad: string, allowBuiltinFallback: boolean) => {
-      setLoadProgress(0);
-      slot.loader.load(
-        urlToLoad,
-        (gltf) => {
-          if (cancelled) return;
-          cleanupLoaded();
-
-          const vrm = gltf.userData.vrm as VRM | undefined;
-          if (vrm) {
-            VRMUtils.removeUnnecessaryVertices(gltf.scene);
-            VRMUtils.removeUnnecessaryJoints(gltf.scene);
-            VRMUtils.rotateVRM0(vrm);
-
-            vrm.scene.traverse((obj) => {
-              obj.frustumCulled = false;
-              if ((obj as THREE.Mesh).isMesh) {
-                obj.castShadow = true;
-                obj.receiveShadow = true;
-              }
-            });
-
-            const vrmRig = buildVrmRigCache(vrm);
-
-            // Apply sleeping pose immediately on first frame if starting in Standby mode
-            if (isSleepingRef.current) {
-              const headNode = vrmRig.head ?? vrm.humanoid?.getNormalizedBoneNode('head');
-              if (headNode) {
-                headNode.rotation.x = 0.12;
-                headNode.rotation.z = 0.025;
-              }
-              if (vrm.expressionManager) {
-                setVrmBlink(vrm.expressionManager, 1.0);
-                if (vrm.expressionManager.getExpression('Fcl_EYE_Natural')) {
-                  vrm.expressionManager.setValue('Fcl_EYE_Natural', 0);
-                }
-              }
-            }
-
-            vrm.update(0);
-
-            // Scale & frame neatly from the chest up aligned to portrait camera & halo ring
-            const box = new THREE.Box3().setFromObject(vrm.scene);
-            const size = new THREE.Vector3();
-            const center = new THREE.Vector3();
-            box.getSize(size);
-            box.getCenter(center);
-
-            if (size.y > 0.05) {
-              const scale = 1.66 / size.y;
-              vrm.scene.scale.setScalar(scale);
-              box.setFromObject(vrm.scene);
-              box.getCenter(center);
-              vrm.scene.position.x -= center.x;
-              vrm.scene.position.z -= center.z;
-              vrm.scene.updateMatrixWorld(true);
-
-              const headNode = vrm.humanoid?.getNormalizedBoneNode('head');
-              if (headNode) {
-                const headWorldPos = new THREE.Vector3();
-                headNode.getWorldPosition(headWorldPos);
-                vrm.scene.position.y += 1.48 - headWorldPos.y;
-              } else {
-                vrm.scene.position.y -= box.min.y;
-              }
-            }
-
-            slot.scene.add(vrm.scene);
-            slot.loadedVrm = vrm;
-            slot.vrmRig = vrmRig;
-            slot.holoRoot.visible = false;
-            setHasLoadedAvatar(true);
-            setGlbLoading(false);
-            return;
-          }
-
-          // Standard GLB fallback
-          const model = gltf.scene;
-          tuneArmBonesToRestPose(model);
-
-          const morphMeshes: THREE.Mesh[] = [];
-          let headBone: THREE.Bone | null = null;
-          let spineBone: THREE.Bone | null = null;
-
-          model.traverse((obj) => {
-            const mesh = obj as THREE.Mesh;
-            if (mesh.isMesh) {
-              mesh.castShadow = true;
-              mesh.receiveShadow = true;
-              if (mesh.morphTargetDictionary && mesh.morphTargetInfluences) {
-                morphMeshes.push(mesh);
-              }
-            }
-            const bone = obj as THREE.Bone;
-            if (bone.isBone) {
-              if (/^head$/i.test(bone.name) || /mixamorigHead/i.test(bone.name)) {
-                headBone = bone;
-              }
-              if (
-                /^spine2?$/i.test(bone.name) ||
-                /mixamorigSpine2/i.test(bone.name)
-              ) {
-                spineBone = bone;
-              }
-            }
-          });
-
-          const box = new THREE.Box3().setFromObject(model);
-          const size = new THREE.Vector3();
-          const center = new THREE.Vector3();
-          box.getSize(size);
-          box.getCenter(center);
-
-          if (size.y > 0.01) {
-            const scale = 1.72 / size.y;
-            model.scale.setScalar(scale);
-            box.setFromObject(model);
-            box.getCenter(center);
-            model.position.x -= center.x;
-            model.position.z -= center.z;
-            model.position.y -= box.min.y;
-          }
-
-          slot.scene.add(model);
-          slot.loadedModel = model;
-          slot.morphMeshes = morphMeshes;
-          slot.headBone = headBone;
-          slot.spineBone = spineBone;
-          slot.holoRoot.visible = false;
-          setHasLoadedAvatar(true);
-          setGlbLoading(false);
-        },
-        (xhr) => {
-          if (cancelled) return;
-          if (xhr.lengthComputable && xhr.total > 0) {
-            const pct = Math.round((xhr.loaded / xhr.total) * 100);
-            setLoadProgress(pct);
-          } else {
-            setLoadProgress((prev) => Math.min(95, prev + 12));
-          }
-        },
-        (err) => {
-          if (cancelled) return;
-          if (allowBuiltinFallback && urlToLoad !== '/tampi.vrm') {
-            glbErrorCbRef.current?.(
-              'Could not load custom avatar — restored built-in Tampi.',
-            );
-            loadModelUrl('/tampi.vrm', false);
-            return;
-          }
-          cleanupLoaded();
-          slot.holoRoot.visible = true;
-          setGlbLoading(false);
-          const reason = err instanceof Error ? err.message : 'Network load or GLTF parse failure';
-          glbErrorCbRef.current?.(`Could not load Tampi 3D avatar: ${reason}`);
-        },
+    const normalizeCustomModelUrl = (raw: string): string => {
+      const trimmed = raw.trim();
+      const githubBlobMatch = trimmed.match(
+        /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/([^/]+)\/(.+)$/i,
       );
+      if (githubBlobMatch) {
+        const [, owner, repo, branch, filePath] = githubBlobMatch;
+        return `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${filePath}`;
+      }
+      return trimmed;
     };
 
-    loadModelUrl(activeUrl, activeUrl !== '/tampi.vrm');
+    const primaryUrl = normalizeCustomModelUrl(
+      vrmUrl || customGlbUrl || DEFAULT_BUILTIN_VRM_URL,
+    );
+    const candidates: string[] = [];
+    if (primaryUrl) {
+      candidates.push(primaryUrl);
+    }
+    if (!candidates.includes(DEFAULT_BUILTIN_VRM_URL)) {
+      candidates.push(DEFAULT_BUILTIN_VRM_URL);
+    }
+    if (!candidates.includes('/tampi.vrm')) {
+      candidates.push('/tampi.vrm');
+    }
+    if (!candidates.includes(REMOTE_FALLBACK_VRM_URL)) {
+      candidates.push(REMOTE_FALLBACK_VRM_URL);
+    }
+
+    const isCustomPrimary =
+      primaryUrl !== DEFAULT_BUILTIN_VRM_URL &&
+      primaryUrl !== '/tampi.vrm' &&
+      primaryUrl !== REMOTE_FALLBACK_VRM_URL;
+
+    let cancelled = false;
+    let activeAbort: AbortController | null = null;
+    setGlbLoading(true);
+    setLoadProgress(5);
+
+    const handleParsedGltf = (gltf: {
+      scene: THREE.Group;
+      userData: Record<string, unknown>;
+    }) => {
+      if (cancelled) return;
+      cleanupLoaded();
+
+      const vrm = gltf.userData.vrm as VRM | undefined;
+      if (vrm) {
+        try {
+          VRMUtils.removeUnnecessaryVertices(gltf.scene);
+          VRMUtils.removeUnnecessaryJoints(gltf.scene);
+        } catch {
+          // Ignore non-critical mesh cleanup errors on custom VRM exports
+        }
+        try {
+          VRMUtils.rotateVRM0(vrm);
+        } catch {
+          // Ignore rotation helper error if metadata is non-standard
+        }
+
+        vrm.scene.traverse((obj) => {
+          obj.frustumCulled = false;
+          if ((obj as THREE.Mesh).isMesh) {
+            obj.castShadow = true;
+            obj.receiveShadow = true;
+          }
+        });
+
+        const vrmRig = buildVrmRigCache(vrm);
+
+        // Apply sleeping pose immediately on first frame if starting in Standby mode
+        if (isSleepingRef.current) {
+          const headNode = vrmRig.head ?? vrm.humanoid?.getNormalizedBoneNode('head');
+          if (headNode) {
+            headNode.rotation.x = 0.12;
+            headNode.rotation.z = 0.025;
+          }
+          if (vrm.expressionManager) {
+            setVrmBlink(vrm.expressionManager, 1.0);
+            if (vrm.expressionManager.getExpression('Fcl_EYE_Natural')) {
+              vrm.expressionManager.setValue('Fcl_EYE_Natural', 0);
+            }
+          }
+        }
+
+        vrm.update(0);
+
+        // Scale & frame neatly from the chest up aligned to portrait camera & halo ring
+        const box = new THREE.Box3().setFromObject(vrm.scene);
+        const size = new THREE.Vector3();
+        const center = new THREE.Vector3();
+        box.getSize(size);
+        box.getCenter(center);
+
+        if (size.y > 0.05) {
+          const scale = 1.66 / size.y;
+          vrm.scene.scale.setScalar(scale);
+          box.setFromObject(vrm.scene);
+          box.getCenter(center);
+          vrm.scene.position.x -= center.x;
+          vrm.scene.position.z -= center.z;
+          vrm.scene.updateMatrixWorld(true);
+
+          const headNode = vrm.humanoid?.getNormalizedBoneNode('head');
+          if (headNode) {
+            const headWorldPos = new THREE.Vector3();
+            headNode.getWorldPosition(headWorldPos);
+            vrm.scene.position.y += 1.48 - headWorldPos.y;
+          } else {
+            vrm.scene.position.y -= box.min.y;
+          }
+        }
+
+        slot.scene.add(vrm.scene);
+        slot.loadedVrm = vrm;
+        slot.vrmRig = vrmRig;
+        slot.holoRoot.visible = false;
+        setLoadProgress(100);
+        setHasLoadedAvatar(true);
+        setGlbLoading(false);
+        return;
+      }
+
+      // Standard GLB fallback
+      const model = gltf.scene;
+      tuneArmBonesToRestPose(model);
+
+      const morphMeshes: THREE.Mesh[] = [];
+      let headBone: THREE.Bone | null = null;
+      let spineBone: THREE.Bone | null = null;
+
+      model.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (mesh.isMesh) {
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          if (mesh.morphTargetDictionary && mesh.morphTargetInfluences) {
+            morphMeshes.push(mesh);
+          }
+        }
+        const bone = obj as THREE.Bone;
+        if (bone.isBone) {
+          if (/^head$/i.test(bone.name) || /mixamorigHead/i.test(bone.name)) {
+            headBone = bone;
+          }
+          if (
+            /^spine2?$/i.test(bone.name) ||
+            /mixamorigSpine2/i.test(bone.name)
+          ) {
+            spineBone = bone;
+          }
+        }
+      });
+
+      const box = new THREE.Box3().setFromObject(model);
+      const size = new THREE.Vector3();
+      const center = new THREE.Vector3();
+      box.getSize(size);
+      box.getCenter(center);
+
+      if (size.y > 0.01) {
+        const scale = 1.72 / size.y;
+        model.scale.setScalar(scale);
+        box.setFromObject(model);
+        box.getCenter(center);
+        model.position.x -= center.x;
+        model.position.z -= center.z;
+        model.position.y -= box.min.y;
+      }
+
+      slot.scene.add(model);
+      slot.loadedModel = model;
+      slot.morphMeshes = morphMeshes;
+      slot.headBone = headBone;
+      slot.spineBone = spineBone;
+      slot.holoRoot.visible = false;
+      setLoadProgress(100);
+      setHasLoadedAvatar(true);
+      setGlbLoading(false);
+    };
+
+    const fetchValidatedArrayBuffer = async (
+      urlToLoad: string,
+      allowJsonGltf: boolean,
+    ): Promise<ArrayBuffer> => {
+      activeAbort = new AbortController();
+      const timeoutId = window.setTimeout(() => activeAbort?.abort(), 28000);
+
+      try {
+        const res = await fetch(urlToLoad, {
+          signal: activeAbort.signal,
+          cache: urlToLoad.startsWith('blob:') ? 'no-store' : 'default',
+        });
+
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+
+        const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        if (contentType.includes('text/html')) {
+          throw new Error('Server returned HTML instead of a 3D avatar file');
+        }
+
+        const totalHeader = res.headers.get('content-length');
+        const expectedTotal = totalHeader ? Number(totalHeader) : 0;
+
+        let buffer: ArrayBuffer;
+        if (res.body && typeof res.body.getReader === 'function') {
+          const reader = res.body.getReader();
+          const chunks: Uint8Array[] = [];
+          let received = 0;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (cancelled) {
+              throw new Error('Cancelled');
+            }
+            if (value && value.byteLength > 0) {
+              chunks.push(value);
+              received += value.byteLength;
+              if (expectedTotal > 0) {
+                const pct = Math.min(94, Math.max(8, Math.round((received / expectedTotal) * 90)));
+                setLoadProgress(pct);
+              } else {
+                setLoadProgress((prev) => Math.min(90, Math.max(prev + 7, 15)));
+              }
+            }
+          }
+
+          const merged = new Uint8Array(received);
+          let offset = 0;
+          for (const chunk of chunks) {
+            merged.set(chunk, offset);
+            offset += chunk.byteLength;
+          }
+          buffer = merged.buffer;
+        } else {
+          setLoadProgress(55);
+          buffer = await res.arrayBuffer();
+          setLoadProgress(90);
+        }
+
+        if (buffer.byteLength < 1024) {
+          throw new Error('Avatar payload too small or corrupted');
+        }
+
+        const view = new DataView(buffer);
+        const magic = view.getUint32(0, true);
+        const isGlbMagic = magic === 0x46546c67; // 'glTF'
+        const firstByte = view.getUint8(0);
+        const isJsonGltf = allowJsonGltf && (firstByte === 0x7b || firstByte === 0x20 || firstByte === 0x0a);
+        if (!isGlbMagic && !isJsonGltf) {
+          throw new Error('Invalid VRM/GLB binary header');
+        }
+
+        return buffer;
+      } finally {
+        window.clearTimeout(timeoutId);
+        activeAbort = null;
+      }
+    };
+
+    const parseArrayBuffer = (buffer: ArrayBuffer, resourcePath: string) =>
+      new Promise<{ scene: THREE.Group; userData: Record<string, unknown> }>(
+        (resolve, reject) => {
+          setLoadProgress(96);
+          slot.loader.parse(
+            buffer,
+            resourcePath,
+            (gltf) => resolve(gltf as unknown as { scene: THREE.Group; userData: Record<string, unknown> }),
+            (err) =>
+              reject(
+                err instanceof Error ? err : new Error('GLTF/VRM parse failed'),
+              ),
+          );
+        },
+      );
+
+    void (async () => {
+      let lastReason = 'Network load or GLTF parse failure';
+
+      for (let i = 0; i < candidates.length; i++) {
+        if (cancelled) return;
+        const candidateUrl = candidates[i];
+        const isCustomCandidate = isCustomPrimary && i === 0;
+        setLoadProgress(8);
+
+        try {
+          const buffer = await fetchValidatedArrayBuffer(
+            candidateUrl,
+            isCustomCandidate,
+          );
+          if (cancelled) return;
+
+          const baseDir = candidateUrl.startsWith('blob:')
+            ? ''
+            : candidateUrl.slice(0, candidateUrl.lastIndexOf('/') + 1);
+          const gltf = await parseArrayBuffer(buffer, baseDir);
+          if (cancelled) return;
+
+          handleParsedGltf(gltf);
+          if (isCustomPrimary && i > 0) {
+            glbErrorCbRef.current?.(
+              'Custom avatar could not load — restored built-in Tampi.',
+            );
+          }
+          return;
+        } catch (err) {
+          if (cancelled) return;
+          lastReason =
+            err instanceof Error ? err.message : 'Network or parse failure';
+        }
+      }
+
+      if (cancelled) return;
+      cleanupLoaded();
+      slot.holoRoot.visible = true;
+      setGlbLoading(false);
+      glbErrorCbRef.current?.(`Could not load Tampi 3D avatar: ${lastReason}`);
+    })();
 
     return () => {
       cancelled = true;
+      activeAbort?.abort();
     };
   }, [isAvatarResolving, vrmUrl, customGlbUrl]);
 
@@ -1929,15 +2094,23 @@ export const TampiStage: React.FC<TampiStageProps> = ({
       <div ref={mountRef} className="w-full h-full" />
 
       {showHoloLoading && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center pt-56">
-          <div className="rounded-xl bg-[#071120]/88 border border-cyan-400/35 px-4 py-2 text-xs font-medium tracking-wide text-cyan-200 shadow-[0_0_24px_rgba(34,211,238,0.2)]">
-            Loading 3D Model... {loadProgress > 0 ? `${loadProgress}%` : 'Connecting...'}
+        <div className="pointer-events-none absolute inset-0 z-[11] flex items-center justify-center px-4">
+          <div className="flex flex-col items-center gap-2 rounded-2xl bg-[#071120]/90 border border-cyan-400/45 px-5 py-3 shadow-[0_0_28px_rgba(34,211,238,0.28)]">
+            <span className="font-mono text-xs sm:text-sm font-semibold tracking-wider text-cyan-200">
+              Initializing Hologram... {loadProgress}%
+            </span>
+            <div className="h-1 w-40 overflow-hidden rounded-full bg-cyan-950/80">
+              <div
+                className="h-full rounded-full bg-cyan-400 transition-all duration-150"
+                style={{ width: `${Math.max(6, Math.min(100, loadProgress))}%` }}
+              />
+            </div>
           </div>
         </div>
       )}
 
       {showNoAvatarHint && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center pt-56">
+        <div className="pointer-events-none absolute inset-0 z-[11] flex items-center justify-center px-4">
           <div className="rounded-xl bg-[#071120]/85 border border-cyan-400/25 px-4 py-2 text-xs text-cyan-200/85">
             Holographic standby active · Built-in avatar unavailable
           </div>

@@ -7,6 +7,7 @@ import {
   StructuredAction,
   StudyTask,
 } from '../types/tampi';
+import { acquireUnlockedOutputAudioContext } from './wakeWord';
 
 function downsampleBuffer(
   input: Float32Array,
@@ -114,8 +115,8 @@ export class GeminiLiveClient {
     this.disconnect();
     this.isDisconnected = false;
 
-    // 1. Unlock & Resume Playback AudioContext Immediately on First Wake-Up
-    this.outputCtx = new AudioContext({ sampleRate: 24000 });
+    // 1. Acquire & Resume Unlocked Playback AudioContext Immediately on Wake-Up
+    this.outputCtx = await acquireUnlockedOutputAudioContext();
     await this.outputCtx.resume();
     this.analyser = this.outputCtx.createAnalyser();
     this.analyser.fftSize = 256;
@@ -142,7 +143,7 @@ export class GeminiLiveClient {
     const wsUrl = `${protocol}//${window.location.host}/live`;
     this.ws = new WebSocket(wsUrl);
 
-    this.ws.onopen = async () => {
+    this.ws.onopen = () => {
       if (this.isDisconnected) return;
       this.ws?.send(
         JSON.stringify({
@@ -166,26 +167,11 @@ export class GeminiLiveClient {
             role: h.role,
             text: h.text,
           })),
-          wakeTrigger: config.wakeTrigger,
         }),
       );
-
-      // Wait 150ms for the audio output buffer to attach before sending wake greeting trigger
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      if (this.isDisconnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-
-      if (config.wakeTrigger) {
-        this.ws.send(
-          JSON.stringify({
-            type: 'text',
-            text: config.wakeTrigger,
-            turnComplete: true,
-          }),
-        );
-      }
     };
 
-    this.ws.onmessage = (event) => {
+    this.ws.onmessage = async (event) => {
       if (this.isDisconnected) return;
       const msg = JSON.parse(event.data) as {
         type: string;
@@ -196,6 +182,33 @@ export class GeminiLiveClient {
       };
 
       if (msg.type === 'ready') {
+        if (this.outputCtx && this.outputCtx.state === 'suspended') {
+          try {
+            await this.outputCtx.resume();
+          } catch {
+            // ignore resume errors
+          }
+        }
+
+        if (config.wakeTrigger) {
+          // Wait 200ms after Gemini Live onopen ('ready') for audio output readiness, then trigger Tampi to speak FIRST
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          if (
+            this.isDisconnected ||
+            !this.ws ||
+            this.ws.readyState !== WebSocket.OPEN
+          ) {
+            return;
+          }
+          this.ws.send(
+            JSON.stringify({
+              type: 'text',
+              text: config.wakeTrigger,
+              turnComplete: true,
+            }),
+          );
+        }
+
         this.startMicCapture();
         this.handlers.onReady();
       } else if (msg.type === 'audio' && msg.audio) {
@@ -397,11 +410,11 @@ export class GeminiLiveClient {
       void this.inputCtx.close();
       this.inputCtx = null;
     }
-    if (this.outputCtx) {
-      void this.outputCtx.close();
-      this.outputCtx = null;
+    if (this.analyser) {
+      this.analyser.disconnect();
+      this.analyser = null;
     }
-    this.analyser = null;
+    this.outputCtx = null;
     this.freqData = null;
 
     if (this.ws) {

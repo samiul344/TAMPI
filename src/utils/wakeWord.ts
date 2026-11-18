@@ -1,14 +1,3 @@
-const LEGACY_HARDCODED_WAKE_SET = new Set([
-  'আমি সামিউল / ami samiul / hey tampi',
-  'আমি সামিউল',
-  'ami samiul',
-]);
-
-const LEGACY_HARDCODED_SHUTDOWN_SET = new Set([
-  'তুমি এখন বন্ধ হয়ে যাও / বন্ধ হয়ে যাও / শ্যাটডাউন / shutdown / go to sleep',
-  'তুমি এখন বন্ধ হয়ে যাও / বন্ধ হয়ে যাও / শ্যাটডাউন / shutdown / go to sleep',
-]);
-
 export function normalizeSpeechText(text: string): string {
   return text
     .normalize('NFC')
@@ -91,24 +80,7 @@ const BENGALI_CHAR_MAP: Record<string, string> = {
  * phonetic skeleton so cross-script speech recognition matches reliably.
  */
 export function toPhoneticRoman(text: string): string {
-  let normalized = normalizeSpeechText(text);
-
-  const aliasMap: Record<string, string> = {
-    'ওয়েক আপ': 'wake up',
-    'ওয়েক আপ': 'wake up',
-    'ওয়াক আপ': 'wake up',
-    'ওয়েিক আপ': 'wake up',
-    'শাটডাউন': 'shut down',
-    'শাট ডাউন': 'shut down',
-    'গো টু স্লিপ': 'go to sleep',
-    'স্লিপ': 'sleep',
-  };
-
-  for (const [bn, en] of Object.entries(aliasMap)) {
-    if (normalized.includes(bn)) {
-      normalized = normalized.replace(new RegExp(bn, 'g'), en);
-    }
-  }
+  const normalized = normalizeSpeechText(text);
 
   const deconstructed = normalized
     // NFC decomposes ড়, ঢ়, য় into base + \u09bc (nukta); normalize both forms first
@@ -218,18 +190,6 @@ function fuzzyWordWindowMatches(
     }
   }
   return false;
-}
-
-export function isLegacyHardcodedWakePhrase(raw?: string | null): boolean {
-  const trimmed = (raw ?? '').normalize('NFC').trim().toLowerCase();
-  if (!trimmed) return false;
-  return LEGACY_HARDCODED_WAKE_SET.has(trimmed);
-}
-
-export function isLegacyHardcodedShutdownPhrase(raw?: string | null): boolean {
-  const trimmed = (raw ?? '').normalize('NFC').trim().toLowerCase();
-  if (!trimmed) return false;
-  return LEGACY_HARDCODED_SHUTDOWN_SET.has(trimmed);
 }
 
 /**
@@ -577,22 +537,59 @@ export function matchesShutdownPhrase(
   );
 }
 
+let sharedOutputCtx: AudioContext | null = null;
+
+function createOutputAudioContext(): AudioContext | null {
+  const AudioCtx =
+    window.AudioContext ||
+    (window as unknown as { webkitAudioContext?: typeof AudioContext })
+      .webkitAudioContext;
+  if (!AudioCtx) return null;
+  try {
+    return new AudioCtx({ sampleRate: 24000 });
+  } catch {
+    return new AudioCtx();
+  }
+}
+
 /**
- * Unlocks Web Audio API on first user gesture if browser autoplay policy requires it.
+ * Acquires (or creates) a shared 24kHz output AudioContext and ensures it is resumed & unlocked.
+ */
+export async function acquireUnlockedOutputAudioContext(): Promise<AudioContext> {
+  if (!sharedOutputCtx || sharedOutputCtx.state === 'closed') {
+    sharedOutputCtx = createOutputAudioContext();
+  }
+  if (!sharedOutputCtx) {
+    throw new Error('Web Audio API is not supported in this browser.');
+  }
+  if (sharedOutputCtx.state === 'suspended') {
+    try {
+      await sharedOutputCtx.resume();
+    } catch {
+      // Ignore if resume needs a gesture; silent buffer prime below still helps
+    }
+  }
+  return sharedOutputCtx;
+}
+
+/**
+ * Unlocks Web Audio API immediately on user gesture or wake-up so browser autoplay policy never silences output.
  */
 export function unlockAudioPlayback(): void {
   try {
-    const AudioCtx =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext })
-        .webkitAudioContext;
-    if (!AudioCtx) return;
-    const ctx = new AudioCtx();
-    void ctx.resume().finally(() => {
-      window.setTimeout(() => {
-        void ctx.close();
-      }, 150);
-    });
+    if (!sharedOutputCtx || sharedOutputCtx.state === 'closed') {
+      sharedOutputCtx = createOutputAudioContext();
+    }
+    if (!sharedOutputCtx) return;
+    const ctx = sharedOutputCtx;
+    if (ctx.state === 'suspended') {
+      void ctx.resume();
+    }
+    const silentBuffer = ctx.createBuffer(1, 1, ctx.sampleRate || 24000);
+    const src = ctx.createBufferSource();
+    src.buffer = silentBuffer;
+    src.connect(ctx.destination);
+    src.start(0);
   } catch {
     // Ignore audio context restrictions
   }

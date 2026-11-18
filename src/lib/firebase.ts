@@ -25,11 +25,7 @@ import {
   StudyTask,
   TampiSettings,
 } from '../types/tampi';
-import {
-  isLegacyHardcodedShutdownPhrase,
-  isLegacyHardcodedWakePhrase,
-  parseVoicePhraseList,
-} from '../utils/wakeWord';
+import { parseVoicePhraseList } from '../utils/wakeWord';
 
 const SETTINGS_DOC_ID = 'preferences';
 
@@ -114,14 +110,8 @@ function sanitizeId(rawId: string | undefined, prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function sanitizeWake(raw: unknown): string {
-  const str = typeof raw === 'string' ? raw.trim() : '';
-  return isLegacyHardcodedWakePhrase(str) ? '' : str;
-}
-
-function sanitizeShutdown(raw: unknown): string {
-  const str = typeof raw === 'string' ? raw.trim() : '';
-  return isLegacyHardcodedShutdownPhrase(str) ? '' : str;
+function trimPhrase(raw: unknown): string {
+  return typeof raw === 'string' ? raw.trim() : '';
 }
 
 function extractSettingsPatch(
@@ -162,10 +152,10 @@ function extractSettingsPatch(
     patch.standbyWakeEnabled = data.standbyWakeEnabled;
   }
   if (typeof data.secretWakePhrase === 'string') {
-    patch.secretWakePhrase = sanitizeWake(data.secretWakePhrase);
+    patch.secretWakePhrase = trimPhrase(data.secretWakePhrase);
   }
   if (typeof data.secretShutdownPhrase === 'string') {
-    patch.secretShutdownPhrase = sanitizeShutdown(data.secretShutdownPhrase);
+    patch.secretShutdownPhrase = trimPhrase(data.secretShutdownPhrase);
   }
   if (typeof data.voiceCodesConfigured === 'boolean') {
     const cleanWake = patch.secretWakePhrase ?? '';
@@ -197,8 +187,8 @@ export async function ensureAndSyncUserProfile(
   const settingsRef = doc(db, 'users', user.uid, 'settings', SETTINGS_DOC_ID);
   const fallbackName = user.email ? user.email.split('@')[0] : 'Friend';
 
-  const cleanWake = sanitizeWake(settings.secretWakePhrase);
-  const cleanShutdown = sanitizeShutdown(settings.secretShutdownPhrase);
+  const cleanWake = trimPhrase(settings.secretWakePhrase);
+  const cleanShutdown = trimPhrase(settings.secretShutdownPhrase);
   const hasLocalConfigured =
     Boolean(settings.voiceCodesConfigured) &&
     parseVoicePhraseList(cleanWake).length > 0 &&
@@ -228,7 +218,6 @@ export async function ensureAndSyncUserProfile(
     baseProfilePayload.lastActiveAt = clampString(settings.lastActiveAt, 64);
   }
 
-  let existingProfileData: Record<string, unknown> | null = null;
   try {
     const existingProfileSnap = await getDoc(profileRef);
     if (!existingProfileSnap.exists()) {
@@ -237,11 +226,8 @@ export async function ensureAndSyncUserProfile(
         ...baseProfilePayload,
         createdAt: serverTimestamp(),
       });
-    } else {
-      existingProfileData = existingProfileSnap.data() as Record<string, unknown>;
-      if (isNewUpdate) {
-        await updateDoc(profileRef, baseProfilePayload);
-      }
+    } else if (isNewUpdate) {
+      await updateDoc(profileRef, baseProfilePayload);
     }
   } catch (error) {
     handleFirestoreError(
@@ -254,32 +240,9 @@ export async function ensureAndSyncUserProfile(
   try {
     const existingSettingsSnap = await getDoc(settingsRef);
     if (!existingSettingsSnap.exists()) {
-      // On first creation of users/{uid}/settings/preferences, check if the parent doc had
-      // explicitly user-customized non-legacy phrases; otherwise require first-time setup.
-      const legacyCustomWake = existingProfileData
-        ? sanitizeWake(existingProfileData.secretWakePhrase)
-        : '';
-      const legacyCustomShutdown = existingProfileData
-        ? sanitizeShutdown(existingProfileData.secretShutdownPhrase)
-        : '';
-      const legacyConfigured =
-        Boolean(existingProfileData?.voiceCodesConfigured ?? (legacyCustomWake && legacyCustomShutdown)) &&
-        parseVoicePhraseList(legacyCustomWake).length > 0 &&
-        parseVoicePhraseList(legacyCustomShutdown).length > 0;
-
-      const initialWake = isNewUpdate
-        ? cleanWake
-        : legacyConfigured
-          ? legacyCustomWake
-          : '';
-      const initialShutdown = isNewUpdate
-        ? cleanShutdown
-        : legacyConfigured
-          ? legacyCustomShutdown
-          : '';
-      const initialConfigured = isNewUpdate
-        ? hasLocalConfigured
-        : legacyConfigured;
+      const initialWake = isNewUpdate ? cleanWake : '';
+      const initialShutdown = isNewUpdate ? cleanShutdown : '';
+      const initialConfigured = isNewUpdate ? hasLocalConfigured : false;
 
       const settingsCreatePayload: Record<string, unknown> = {
         userId: user.uid,

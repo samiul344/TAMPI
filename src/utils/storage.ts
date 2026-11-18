@@ -8,11 +8,60 @@ import {
   StudyTask,
   TampiSettings,
 } from '../types/tampi';
-import {
-  isLegacyHardcodedShutdownPhrase,
-  isLegacyHardcodedWakePhrase,
-  parseVoicePhraseList,
-} from './wakeWord';
+import { parseVoicePhraseList } from './wakeWord';
+
+const LEGACY_UNSCOPED_KEYS = [
+  'tampi_settings',
+  'tampi_settings_v1',
+  'tampi_settings_v2',
+  'tampi_voice_commands',
+  'tampi_wake_phrase',
+  'tampi_shutdown_phrase',
+  'tampi_memories',
+  'tampi_memories_v1',
+  'tampi_tasks',
+  'tampi_tasks_v1',
+  'tampi_history',
+  'tampi_history_v1',
+  'tampi_sessions',
+  'tampi_sessions_v1',
+  'tampi_last_active',
+  'secretWakePhrase',
+  'secretShutdownPhrase',
+  'wakePhrase',
+  'shutdownPhrase',
+];
+
+/**
+ * Purges any legacy unscoped localStorage voice/settings keys so only
+ * the currently signed-in user's UID-scoped Firestore settings are used.
+ */
+export function purgeLegacyUnscopedVoiceStorage(): void {
+  if (typeof localStorage === 'undefined') return;
+  try {
+    for (const key of LEGACY_UNSCOPED_KEYS) {
+      localStorage.removeItem(key);
+    }
+    const keysToDelete: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k) continue;
+      if (
+        !k.startsWith('tampi_u_') &&
+        /^(tampi_|secret_?(wake|shutdown)|wake_?phrase|shutdown_?phrase|voice_?commands)/i.test(
+          k,
+        )
+      ) {
+        keysToDelete.push(k);
+      }
+    }
+    for (const k of keysToDelete) {
+      localStorage.removeItem(k);
+    }
+  } catch {
+    // Ignore storage access errors
+  }
+}
 
 function scopedKey(scopeKey: string, suffix: string): string {
   const safeScope = (scopeKey || 'guest').replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -33,12 +82,8 @@ export function loadSettings(scopeKey = 'guest'): TampiSettings {
     localStorage.getItem(scopedKey(scopeKey, 'settings_v2')),
     {},
   );
-  const rawWake = saved.secretWakePhrase?.trim() ?? '';
-  const rawShutdown = saved.secretShutdownPhrase?.trim() ?? '';
-  const cleanWake = isLegacyHardcodedWakePhrase(rawWake) ? '' : rawWake;
-  const cleanShutdown = isLegacyHardcodedShutdownPhrase(rawShutdown)
-    ? ''
-    : rawShutdown;
+  const cleanWake = saved.secretWakePhrase?.trim() ?? '';
+  const cleanShutdown = saved.secretShutdownPhrase?.trim() ?? '';
   const hasValidCodes =
     parseVoicePhraseList(cleanWake).length > 0 &&
     parseVoicePhraseList(cleanShutdown).length > 0;

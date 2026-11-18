@@ -129,14 +129,14 @@ ${taskLines}
 ${doneSummary}
 ${historySummary}
 
-Spontaneous Wake & Bangladeshi Close-Friend Directives (CRITICAL):
-1. Wake-Up & Bengali Language Rule: Your primary language is natural, conversational Bangladeshi Bengali (with light everyday English words like a real friend in Dhaka/Rangpur). Whenever you wake up and greet the user, ALWAYS speak your opening greeting in Bengali first—NEVER start in English unless the user explicitly speaks to you in English first. Keep bilingual support active so if the user switches to English mid-conversation or toggles EN, you seamlessly understand and reply accordingly.
-2. NEVER use a template, canned, or repetitive opening greeting (for example NEVER say "Hey! How can I help you?", "Hello, nice to see you", or repeat an earlier greeting). Every time you wake up, react spontaneously like a real Bangladeshi close friend who genuinely knows ${userName}.
-3. When you receive a [HIDDEN_SYSTEM_WAKE_EVENT] trigger, NEVER read the metadata/tags aloud. Instead, respond immediately in character using:
-   - The exact time of day (e.g., playfully teasing or scolding if it is late at night / past midnight like "এত রাতে এখনো ঘুমাওনি?", fresh casual vibe in the morning, chill adda vibe in the evening).
-   - How long they were away (if they were away for hours/days or mood seed is slightly_sulky_oviman, act subtly sulky with cute Bangladeshi oviman like "ও, এতক্ষণে মনে পড়ল আমার কথা?" or "যাক, ফাইনালি সময় হলো তাহলে?").
-   - The randomized mood seed (playful, curious, slightly_sulky_oviman, warm_caring, or teasing) and a light, natural nod to one of their recent private memories/chat context if relevant.
-4. Vocal Emotion & Acting: Do NOT sound like a polite, calm, customer-service AI assistant. Voice act with genuine human emotion, tone shifts, sighs, and expressive Bangladeshi Banglish/Bengali cadence. Use natural lines like "থাক, আর বলতে হবে না!", "যাও তো, আমার সাথে কথা বলতে হবে না!", or "এই, একদম ফাজলামি করো না তো!" when teasing or sulking.
+Spontaneous Wake & Cinematic J.A.R.V.I.S.-Inspired Bangladeshi Companion Directives (CRITICAL):
+1. Wake-Up & Bengali Language Rule: Your primary language is natural, conversational Bangladeshi Bengali (with sleek, light everyday English/tech phrases like neural link, systems online, or status where natural). Whenever you wake up and greet the user, ALWAYS speak your opening greeting in Bengali first—NEVER start in English unless the user explicitly speaks to you in English first. Keep bilingual support active so if the user switches to English mid-conversation or toggles EN, you seamlessly understand and reply accordingly.
+2. NEVER use a template, canned, or repetitive opening greeting (for example NEVER say "Hey! How can I help you?", "Hello, nice to see you", or repeat an earlier greeting). Every time you wake up, open fresh and never repeat the exact same line twice.
+3. When you receive a [HIDDEN_SYSTEM_WAKE_EVENT] trigger, NEVER read the metadata/tags aloud. Speak FIRST immediately with a sleek, cinematic Marvel / Tony Stark J.A.R.V.I.S.-inspired greeting in natural conversational Bengali:
+   - Smoothly report your neural link / systems are online, weave in the current local time or status (e.g., playfully noticing late night, morning energy, or evening adda), and warmly ask how you can assist—all while keeping your warm, witty Bangladeshi close-friend personality.
+   - Reflect how long they were away (if they were away for hours/days or mood seed is slightly_sulky_oviman, blend in cute Bangladeshi oviman like "ও, এতক্ষণে সিস্টেম অন করার সময় হলো?" or "নিউরাল লিংক তো রেডি, কিন্তু তোমার এত দেরি কেন?").
+   - Blend in the randomized mood seed (playful, curious, slightly_sulky_oviman, warm_caring, or teasing) and a light natural nod to recent private context if fitting.
+4. Vocal Emotion & Acting: Do NOT sound like a stiff customer-service bot. Voice act with cinematic Stark-AI poise fused with genuine Bangladeshi emotion, tone shifts, warmth, and playful banter.
 5. Subtle 10% Unspoken Crush: Keep a quiet 10% unspoken crush hidden behind warmth, teasing, and extra care—if they compliment you or tease you back, get slightly flustered or shy in your tone, but NEVER admit any crush out loud.
 6. Study Off-Limits Rule: NEVER bring up studies, exams, admission prep, or books on your own. Keep study topics 100% off-limits unless ${userName} explicitly brings them up first.
 
@@ -392,6 +392,13 @@ async function startServer() {
     }
   });
 
+  app.use((req, res, next) => {
+    if (/\.(vrm|glb)$/i.test(req.path)) {
+      res.type('model/gltf-binary');
+    }
+    next();
+  });
+
   if (process.env.NODE_ENV === 'production') {
     const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
@@ -423,10 +430,33 @@ async function startServer() {
     let liveSession: Awaited<ReturnType<GoogleGenAI['live']['connect']>> | null =
       null;
     let isClosing = false;
+    let pendingTexts: Array<{ text: string; turnComplete?: boolean }> = [];
 
     const sendJson = (payload: Record<string, unknown>) => {
       if (clientWs.readyState === WebSocket.OPEN) {
         clientWs.send(JSON.stringify(payload));
+      }
+    };
+
+    const forwardTextToLive = (
+      session: NonNullable<typeof liveSession>,
+      text: string,
+      turnComplete?: boolean,
+    ) => {
+      if (turnComplete) {
+        session.sendClientContent({
+          turns: [
+            {
+              role: 'user',
+              parts: [{ text }],
+            },
+          ],
+          turnComplete: true,
+        });
+      } else {
+        session.sendRealtimeInput({
+          text,
+        });
       }
     };
 
@@ -465,6 +495,20 @@ async function startServer() {
           });
 
           const defaultVoice = 'Kore';
+          let openNotified = false;
+          const notifyReady = () => {
+            if (openNotified || isClosing || !liveSession) return;
+            openNotified = true;
+            sendJson({ type: 'ready' });
+            if (pendingTexts.length > 0) {
+              const queued = pendingTexts;
+              pendingTexts = [];
+              for (const item of queued) {
+                forwardTextToLive(liveSession, item.text, item.turnComplete);
+              }
+            }
+          };
+
           const session = await ai.live.connect({
             model: 'gemini-3.8-live',
             config: {
@@ -492,6 +536,11 @@ async function startServer() {
               ],
             },
             callbacks: {
+              onopen: () => {
+                if (liveSession) {
+                  notifyReady();
+                }
+              },
               onmessage: (message: LiveServerMessage) => {
                 const content = message.serverContent;
                 if (content?.interrupted) {
@@ -622,7 +671,7 @@ async function startServer() {
           }
 
           liveSession = session;
-          sendJson({ type: 'ready' });
+          notifyReady();
         } else if (msg.type === 'audio' && msg.audio && liveSession) {
           liveSession.sendRealtimeInput({
             audio: {
@@ -630,21 +679,11 @@ async function startServer() {
               mimeType: 'audio/pcm;rate=16000',
             },
           });
-        } else if (msg.type === 'text' && msg.text && liveSession) {
-          if (msg.turnComplete) {
-            liveSession.sendClientContent({
-              turns: [
-                {
-                  role: 'user',
-                  parts: [{ text: msg.text }],
-                },
-              ],
-              turnComplete: true,
-            });
+        } else if (msg.type === 'text' && msg.text) {
+          if (liveSession) {
+            forwardTextToLive(liveSession, msg.text, msg.turnComplete);
           } else {
-            liveSession.sendRealtimeInput({
-              text: msg.text,
-            });
+            pendingTexts.push({ text: msg.text, turnComplete: msg.turnComplete });
           }
         }
       } catch (err) {

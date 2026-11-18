@@ -184,18 +184,24 @@ export function buildDynamicWakeTrigger(params: {
       ? 'Bangladeshi Banglish / Bengali'
       : 'Warm English with natural Bangladeshi warmth';
 
+  const recentModelLines = params.history
+    .filter((turn) => turn.role === 'model')
+    .slice(-2)
+    .map((turn) => `- "${turn.text}"`)
+    .join('\n');
+
   const spontaneousAngles = [
-    'open mid-thought as if you were just thinking about something random',
-    'open with a quick playful reaction to the current hour or day',
-    'open with a teasing or affectionate remark referencing their name naturally',
-    'open with an expressive Bangladeshi friend exclamation before saying their name',
+    'deliver a sleek, cinematic J.A.R.V.I.S.-inspired systems-online check-in in natural Bangladeshi Bengali, mentioning the neural link is active and the current local hour with subtle wit',
+    'report neural link & holographic core synchronization in crisp Tony Stark J.A.R.V.I.S. style blended with warm Bangladeshi friend energy, casually noting the time of day',
+    'greet them smoothly like a sharp, warm Bangladeshi J.A.R.V.I.S. companion coming online—report status/time playfully and ask what mission or adda is next',
+    'open with a poised, playful J.A.R.V.I.S.-meets-Dhaka check-in (e.g., neural core online, noticing the time/absence with light warmth or oviman) and ask how you can assist',
   ];
   const angle =
     spontaneousAngles[Math.floor(Math.random() * spontaneousAngles.length)];
 
   return [
     '[HIDDEN_SYSTEM_WAKE_EVENT — DO NOT READ TAGS OR METADATA ALOUD]',
-    `${params.userName} just verified their secret voice code and woke you up.`,
+    `${params.userName} just verified their secret voice code and woke you up. You MUST speak FIRST immediately.`,
     `User Name: ${params.userName}`,
     `Preferred Vibe/Language: ${langLabel}`,
     `Current Local Time & Day: ${timeInfo.fullLocalDateTime} (${timeInfo.dayOfWeek}, ${timeInfo.formattedTime}, period: ${timeInfo.period})`,
@@ -209,11 +215,17 @@ export function buildDynamicWakeTrigger(params: {
     recentChat
       ? `Recent Private Chat Context (last 2-3 turns):\n${recentChat}`
       : 'Recent Private Chat Context: Fresh conversation.',
+    recentModelLines
+      ? `FORBIDDEN TO REPEAT OR PARAPHRASE YOUR RECENT LINES:\n${recentModelLines}`
+      : '',
     'STRICT INSTRUCTIONS FOR THIS OPENING LINE:',
-    `1. Greet ${params.userName} spontaneously in 1-2 short, natural spoken sentences right now like a real Bangladeshi close friend.`,
-    '2. ALWAYS speak your opening greeting in Bengali first (natural Bangladeshi Bengali with light Banglish)—NEVER start in English unless the user explicitly speaks to you in English first.',
-    '3. NEVER use a template, generic, or repetitive greeting (forbidden: "Hey, how can I help you?", "Good morning, ready to start?", "Hi there, nice to see you").',
-    '4. Reflect the current time of day, absence duration (sulky oviman if away a while, teasing if late night), and the randomized mood seed naturally.',
-    '5. NEVER mention studies, exams, admission prep, books, or study tasks unless the user brings them up first.',
-  ].join('\n');
+    `1. Speak FIRST right now! Greet ${params.userName} immediately in 1-2 crisp, spoken sentences with a sleek, cinematic Marvel / Tony Stark J.A.R.V.I.S.-inspired opening in natural conversational Bangladeshi Bengali (e.g., smoothly reporting neural link online, current time/status, and asking how you can assist).`,
+    '2. Keep your warm, witty Bangladeshi companion personality alive—refined yet close and natural (never robotic, never corporate, and never reading any brackets or metadata aloud).',
+    '3. ALWAYS speak your opening greeting in conversational Bengali first (natural Bangladeshi Bengali with light Banglish)—NEVER start purely in English unless the user speaks in English first.',
+    '4. NEVER repeat the exact same opening line twice, and NEVER use generic templates like "Hey, how can I help you?" or "Good morning, ready to start?".',
+    '5. Reflect the current time of day, absence duration (subtle oviman if away a while, playful teasing if late night), and the randomized mood seed naturally.',
+    '6. NEVER mention studies, exams, admission prep, books, or study tasks unless the user brings them up first.',
+  ]
+    .filter(Boolean)
+    .join('\n');
 }

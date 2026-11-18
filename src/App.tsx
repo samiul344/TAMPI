@@ -66,6 +66,7 @@ import {
   loadSessions,
   loadSettings,
   loadTasks,
+  purgeLegacyUnscopedVoiceStorage,
   saveHistory,
   saveLastActiveAt,
   saveMemories,
@@ -156,7 +157,7 @@ export default function App() {
 
   const [vrmUrl, setVrmUrl] = useState<string>(DEFAULT_BUILTIN_VRM_URL);
   const [vrmMetadata, setVrmMetadata] = useState<VrmMetadata | null>(null);
-  const [vrmResolving, setVrmResolving] = useState(false);
+  const [vrmResolving, setVrmResolving] = useState(true);
   const [vrmUploading, setVrmUploading] = useState(false);
 
   const [assistantState, setAssistantState] = useState<AssistantState>('idle');
@@ -167,13 +168,7 @@ export default function App() {
 
   const [voiceCommandsOpen, setVoiceCommandsOpen] = useState(false);
   const [voiceSetupReady, setVoiceSetupReady] = useState(false);
-  const [needsVoiceCodeSetup, setNeedsVoiceCodeSetup] = useState(() => {
-    const initial = loadSettings('guest');
-    return (
-      parseVoicePhraseList(initial.secretWakePhrase).length === 0 ||
-      parseVoicePhraseList(initial.secretShutdownPhrase).length === 0
-    );
-  });
+  const [needsVoiceCodeSetup, setNeedsVoiceCodeSetup] = useState(true);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [miniWidget, setMiniWidget] = useState(false);
@@ -206,13 +201,9 @@ export default function App() {
   const scopeKeyRef = useRef<string>('guest');
   const userNameRef = useRef<string>('Friend');
   const settingsRef = useRef(settings);
-  const wakePhrasesRef = useRef<string[]>(
-    parseVoicePhraseList(settings.secretWakePhrase),
-  );
-  const shutdownPhrasesRef = useRef<string[]>(
-    parseVoicePhraseList(settings.secretShutdownPhrase),
-  );
-  const offPhrasesRef = shutdownPhrasesRef;
+  const wakePhrasesRef = useRef<string[]>([]);
+  const offPhrasesRef = useRef<string[]>([]);
+  const shutdownPhrasesRef = offPhrasesRef;
   const memoriesRef = useRef(memories);
   const tasksRef = useRef(tasks);
   const historyRef = useRef(history);
@@ -249,14 +240,19 @@ export default function App() {
 
   useEffect(() => {
     settingsRef.current = settings;
-    wakePhrasesRef.current = parseVoicePhraseList(settings.secretWakePhrase);
-    shutdownPhrasesRef.current = parseVoicePhraseList(
-      settings.secretShutdownPhrase,
-    );
+    if (userRef.current && voiceSetupReady) {
+      wakePhrasesRef.current = parseVoicePhraseList(settings.secretWakePhrase);
+      offPhrasesRef.current = parseVoicePhraseList(
+        settings.secretShutdownPhrase,
+      );
+    } else {
+      wakePhrasesRef.current = [];
+      offPhrasesRef.current = [];
+    }
     if (scopeKeyRef.current === scopeKey) {
       saveSettings(settings, scopeKey);
     }
-  }, [settings, scopeKey]);
+  }, [settings, scopeKey, voiceSetupReady]);
 
   useEffect(() => {
     memoriesRef.current = memories;
@@ -295,12 +291,17 @@ export default function App() {
     }, 3800);
   }, []);
 
-  // Load default built-in 3D avatar on startup for every user and device, then check IndexedDB custom uploads
+  // Purge any old unscoped localStorage voice keys on startup
+  useEffect(() => {
+    purgeLegacyUnscopedVoiceStorage();
+  }, []);
+
+  // Resolve 3D avatar: use IndexedDB custom .vrm ONLY if user explicitly uploaded one in Settings,
+  // otherwise use built-in Tampi (/tampi.vrm -> GitHub raw fallback chain inside TampiStage)
   useEffect(() => {
     let active = true;
     (async () => {
-      setVrmUrl(DEFAULT_BUILTIN_VRM_URL);
-      setVrmResolving(false);
+      setVrmResolving(true);
       try {
         const loaded = await loadVrmFromIndexedDb();
         if (!active) return;
@@ -308,9 +309,18 @@ export default function App() {
           activeVrmBlobRef.current = loaded.blobUrl;
           setVrmUrl(loaded.blobUrl);
           setVrmMetadata(loaded.metadata);
+        } else {
+          setVrmUrl(DEFAULT_BUILTIN_VRM_URL);
+          setVrmMetadata(null);
         }
       } catch {
-        // keep built-in default
+        if (!active) return;
+        setVrmUrl(DEFAULT_BUILTIN_VRM_URL);
+        setVrmMetadata(null);
+      } finally {
+        if (active) {
+          setVrmResolving(false);
+        }
       }
     })();
 
@@ -471,26 +481,18 @@ export default function App() {
         setAssistantState('idle');
       }
 
+      // Strictly clear active phrases until Firestore users/{uid}/settings resolves
+      wakePhrasesRef.current = [];
+      offPhrasesRef.current = [];
+      setVoiceSetupReady(false);
+
       const scopedSettings = loadSettings(nextScope);
       const scopedMemories = loadMemories(nextScope);
       const scopedTasks = loadTasks(nextScope);
       const scopedSessions = loadSessions(nextScope);
       const scopedHistory = loadHistory(nextScope);
 
-      const scopedWakeList = parseVoicePhraseList(
-        scopedSettings.secretWakePhrase,
-      );
-      const scopedShutdownList = parseVoicePhraseList(
-        scopedSettings.secretShutdownPhrase,
-      );
-      const scopedConfigured =
-        Boolean(scopedSettings.voiceCodesConfigured) &&
-        scopedWakeList.length > 0 &&
-        scopedShutdownList.length > 0;
-
       settingsRef.current = scopedSettings;
-      wakePhrasesRef.current = scopedWakeList;
-      shutdownPhrasesRef.current = scopedShutdownList;
       memoriesRef.current = scopedMemories;
       tasksRef.current = scopedTasks;
       historyRef.current = scopedHistory;
@@ -502,20 +504,13 @@ export default function App() {
       setHistory(scopedHistory);
 
       if (!currentUser) {
-        setNeedsVoiceCodeSetup(!scopedConfigured);
-        setCaptionText(
-          scopedConfigured ? STANDBY_CAPTION : SETUP_REQUIRED_CAPTION,
-        );
-        setVoiceSetupReady(true);
+        setNeedsVoiceCodeSetup(true);
+        setCaptionText(SETUP_REQUIRED_CAPTION);
+        setVoiceSetupReady(false);
         setAuthLoading(false);
         return;
       }
 
-      setVoiceSetupReady(scopedConfigured);
-      if (scopedConfigured) {
-        setNeedsVoiceCodeSetup(false);
-        setCaptionText(STANDBY_CAPTION);
-      }
       setAuthLoading(false);
 
       try {
@@ -1214,6 +1209,9 @@ export default function App() {
   }, [disconnectLive]);
 
   const triggerWakeSequence = useCallback(() => {
+    // Unlock AudioContext immediately upon wake-up so Gemini Live audio output plays cleanly
+    unlockAudioPlayback();
+
     if (sleepResumeTimerRef.current) {
       window.clearTimeout(sleepResumeTimerRef.current);
       sleepResumeTimerRef.current = null;
@@ -1280,7 +1278,7 @@ export default function App() {
     wakeConnectTimerRef.current = window.setTimeout(() => {
       setWakeSequenceActive(false);
       void connectLive();
-    }, 620);
+    }, 420);
   }, [connectLive, scheduleEmotionDecay]);
 
   const triggerSleepSequence = useCallback(() => {
@@ -1359,11 +1357,15 @@ export default function App() {
   }, [triggerSleepSequence]);
 
   // Passive Standby Voice-Code Listener (Web Speech API, dynamic bn-BD / en-US + phonetic/fuzzy matching)
-  // Automatically starts once the user's personal voice codes are configured, pauses during Live Call, and restarts cleanly on changes.
+  // Checks ONLY the currently signed-in user's active saved wakePhrases stored under users/{uid}/settings.
   useEffect(() => {
     const hasConfiguredWakePhrases =
+      Boolean(user) &&
+      voiceSetupReady &&
+      wakePhrasesRef.current.length > 0 &&
       parseVoicePhraseList(settings.secretWakePhrase).length > 0;
     const shouldListen =
+      Boolean(user) &&
       !authLoading &&
       voiceSetupReady &&
       !needsVoiceCodeSetup &&
@@ -1604,6 +1606,7 @@ export default function App() {
       }
     };
   }, [
+    user,
     authLoading,
     voiceSetupReady,
     needsVoiceCodeSetup,
@@ -1621,9 +1624,9 @@ export default function App() {
   ]);
 
   // Parallel Web Speech API Shutdown Watcher during an active Live Call
-  // Works alongside Gemini Live inputTranscription to catch shutdown phrases instantly.
+  // Works alongside Gemini Live inputTranscription to catch ONLY the signed-in user's saved offPhrases.
   useEffect(() => {
-    if (!liveConnected || liveMuted || sleepSequenceActive) {
+    if (!user || !voiceSetupReady || !liveConnected || liveMuted || sleepSequenceActive) {
       return;
     }
 
@@ -1718,7 +1721,7 @@ export default function App() {
         }
       }
     };
-  }, [liveConnected, liveMuted, sleepSequenceActive, settings.language]);
+  }, [user, voiceSetupReady, liveConnected, liveMuted, sleepSequenceActive, settings.language]);
 
   const sendMessage = useCallback(
     async (userText: string) => {
@@ -1936,7 +1939,7 @@ export default function App() {
           role="dialog"
           aria-modal="true"
           aria-label="Sign in to Tampi"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[#030711]/92 p-4"
         >
           <div className="flex w-full max-w-[440px] flex-col items-center rounded-2xl bg-[#0a1120] border border-cyan-400/45 p-8 shadow-[0_0_60px_rgba(34,211,238,0.28)] text-center relative overflow-hidden">
             <div className="absolute -top-24 -left-24 h-48 w-48 rounded-full bg-cyan-500/10 blur-3xl pointer-events-none" />

@@ -1,9 +1,20 @@
 import { VrmMetadata } from '../types/tampi';
 
-export const DEFAULT_BUILTIN_VRM_URL =
-  typeof window !== 'undefined'
-    ? new URL('tampi.vrm', window.location.origin + (import.meta.env?.BASE_URL || '/')).href
-    : '/tampi.vrm';
+export function resolveBuiltinVrmUrl(): string {
+  const rawBase = import.meta.env?.BASE_URL || '/';
+  if (typeof window === 'undefined') {
+    const normalized = rawBase.endsWith('/') ? rawBase : `${rawBase}/`;
+    return `${normalized}tampi.vrm`;
+  }
+  const baseUrl = new URL(rawBase, window.location.origin).href;
+  const normalizedBase = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
+  return new URL('tampi.vrm', normalizedBase).href;
+}
+
+export const DEFAULT_BUILTIN_VRM_URL = resolveBuiltinVrmUrl();
+
+export const REMOTE_FALLBACK_VRM_URL =
+  'https://raw.githubusercontent.com/samiul344/TAMPI/main/public/tampi.vrm';
 
 const DB_NAME = 'tampi_assets_db';
 const DB_VERSION = 1;
@@ -29,6 +40,8 @@ function openDb(): Promise<IDBDatabase> {
       }
     };
     request.onsuccess = () => resolve(request.result);
+    request.onblocked = () =>
+      reject(new Error('IndexedDB open blocked.'));
     request.onerror = () =>
       reject(request.error ?? new Error('Failed to open IndexedDB.'));
   });
@@ -79,42 +92,56 @@ export async function loadVrmFromIndexedDb(): Promise<{
   blobUrl: string;
 } | null> {
   if (typeof indexedDB === 'undefined') return null;
-  const db = await openDb();
 
-  const record = await new Promise<StoredVrmRecord | undefined>(
-    (resolve, reject) => {
-      const tx = db.transaction(STORE_NAME, 'readonly');
-      const store = tx.objectStore(STORE_NAME);
-      const req = store.get(ACTIVE_KEY);
-      req.onsuccess = () => {
-        const direct = req.result as StoredVrmRecord | undefined;
-        if (direct && direct.buffer && direct.isCustomUpload !== false) {
-          resolve(direct);
-          return;
-        }
-        resolve(undefined);
+  const readPromise = (async () => {
+    const db = await openDb();
+    try {
+      const record = await new Promise<StoredVrmRecord | undefined>(
+        (resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, 'readonly');
+          const store = tx.objectStore(STORE_NAME);
+          const req = store.get(ACTIVE_KEY);
+          req.onsuccess = () => {
+            const direct = req.result as StoredVrmRecord | undefined;
+            if (direct && direct.buffer && direct.isCustomUpload === true) {
+              resolve(direct);
+              return;
+            }
+            resolve(undefined);
+          };
+          req.onerror = () =>
+            reject(
+              req.error ?? new Error('Failed to read VRM from IndexedDB.'),
+            );
+        },
+      );
+
+      if (!record || !record.buffer || record.buffer.byteLength < 1024) {
+        return null;
+      }
+
+      const blobUrl = URL.createObjectURL(
+        new Blob([record.buffer], { type: 'model/gltf-binary' }),
+      );
+
+      return {
+        metadata: {
+          name: record.name,
+          size: record.size,
+          updatedAt: record.updatedAt,
+        },
+        blobUrl,
       };
-      req.onerror = () =>
-        reject(req.error ?? new Error('Failed to read VRM from IndexedDB.'));
-    },
-  );
+    } finally {
+      db.close();
+    }
+  })();
 
-  db.close();
+  const timeoutPromise = new Promise<null>((resolve) => {
+    window.setTimeout(() => resolve(null), 1000);
+  });
 
-  if (!record || !record.buffer) return null;
-
-  const blobUrl = URL.createObjectURL(
-    new Blob([record.buffer], { type: 'model/gltf-binary' }),
-  );
-
-  return {
-    metadata: {
-      name: record.name,
-      size: record.size,
-      updatedAt: record.updatedAt,
-    },
-    blobUrl,
-  };
+  return Promise.race([readPromise, timeoutPromise]).catch(() => null);
 }
 
 export async function clearVrmFromIndexedDb(): Promise<void> {

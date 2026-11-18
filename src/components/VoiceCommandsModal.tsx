@@ -152,7 +152,7 @@ export const VoiceCommandsModal: React.FC<VoiceCommandsModalProps> = ({
                 setWakeDraft(e.target.value);
                 if (validationError) setValidationError(null);
               }}
-              placeholder="e.g. hello tampi, wake up"
+              placeholder="Enter your custom wake phrase (comma or / separated)"
               className="h-10 w-full rounded-xl bg-[#080c15] border border-white/12 px-3 text-xs text-slate-200 placeholder:text-slate-500 focus:border-cyan-400/50 focus:outline-none"
             />
             <p className="text-[11px] text-slate-400">
@@ -178,7 +178,7 @@ export const VoiceCommandsModal: React.FC<VoiceCommandsModalProps> = ({
                 setShutdownDraft(e.target.value);
                 if (validationError) setValidationError(null);
               }}
-              placeholder="e.g. go to sleep, goodbye tampi"
+              placeholder="Enter your custom sleep phrase (comma or / separated)"
               className="h-10 w-full rounded-xl bg-[#080c15] border border-white/12 px-3 text-xs text-slate-200 placeholder:text-slate-500 focus:border-amber-400/50 focus:outline-none"
             />
             <p className="text-[11px] text-slate-400">
