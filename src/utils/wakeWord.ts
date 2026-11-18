@@ -91,7 +91,26 @@ const BENGALI_CHAR_MAP: Record<string, string> = {
  * phonetic skeleton so cross-script speech recognition matches reliably.
  */
 export function toPhoneticRoman(text: string): string {
-  const normalized = normalizeSpeechText(text)
+  let normalized = normalizeSpeechText(text);
+
+  const aliasMap: Record<string, string> = {
+    'ওয়েক আপ': 'wake up',
+    'ওয়েক আপ': 'wake up',
+    'ওয়াক আপ': 'wake up',
+    'ওয়েিক আপ': 'wake up',
+    'শাটডাউন': 'shut down',
+    'শাট ডাউন': 'shut down',
+    'গো টু স্লিপ': 'go to sleep',
+    'স্লিপ': 'sleep',
+  };
+
+  for (const [bn, en] of Object.entries(aliasMap)) {
+    if (normalized.includes(bn)) {
+      normalized = normalized.replace(new RegExp(bn, 'g'), en);
+    }
+  }
+
+  const deconstructed = normalized
     // NFC decomposes ড়, ঢ়, য় into base + \u09bc (nukta); normalize both forms first
     .replace(/\u09A1\u09BC/g, 'r')
     .replace(/\u09A2\u09BC/g, 'r')
@@ -106,7 +125,7 @@ export function toPhoneticRoman(text: string): string {
     .replace(/্ব/g, 'o');
 
   let latin = '';
-  for (const ch of normalized) {
+  for (const ch of deconstructed) {
     if (ch in BENGALI_CHAR_MAP) {
       latin += BENGALI_CHAR_MAP[ch];
     } else {
@@ -525,6 +544,20 @@ export function matchesStandalonePhraseList(
   }
 
   return false;
+}
+
+export function matchesPhrase(
+  transcript: string,
+  phrase: string,
+): boolean {
+  return matchesPhraseList(transcript, parseVoicePhraseList(phrase));
+}
+
+export function matchesStandalonePhrase(
+  transcript: string,
+  phrase: string,
+): boolean {
+  return matchesStandalonePhraseList(transcript, parseVoicePhraseList(phrase));
 }
 
 export function matchesWakePhrase(

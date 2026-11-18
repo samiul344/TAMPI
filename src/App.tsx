@@ -211,6 +211,7 @@ export default function App() {
   const shutdownPhrasesRef = useRef<string[]>(
     parseVoicePhraseList(settings.secretShutdownPhrase),
   );
+  const offPhrasesRef = shutdownPhrasesRef;
   const memoriesRef = useRef(memories);
   const tasksRef = useRef(tasks);
   const historyRef = useRef(history);
@@ -2108,15 +2109,17 @@ export default function App() {
                       : 'text-slate-400'
                 }`}
               >
-                {assistantState === 'thinking'
-                  ? 'Connecting...'
-                  : needsVoiceCodeSetup
-                    ? 'Set voice codes first'
-                    : micPermissionNeeded
-                      ? 'Tap anywhere to enable voice standby'
-                      : settings.standbyWakeEnabled
-                        ? 'Standby • Speak your secret wake code'
-                        : 'Standby muted'}
+                {standbyHeardText
+                  ? `Heard: "${standbyHeardText}"`
+                  : assistantState === 'thinking'
+                    ? 'Connecting...'
+                    : needsVoiceCodeSetup
+                      ? 'Set voice codes first'
+                      : micPermissionNeeded
+                        ? 'Tap anywhere to enable voice standby'
+                        : settings.standbyWakeEnabled
+                          ? 'Standby • Speak your secret wake code'
+                          : 'Standby muted'}
               </span>
               {standbyListening && standbyAudioDetected && !micPermissionNeeded && (
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />

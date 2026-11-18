@@ -180,15 +180,17 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({
                   : 'text-slate-400'
             }`}
           >
-            {isThinking
-              ? 'Verifying & connecting...'
-              : needsVoiceCodeSetup
-                ? 'Set your private voice codes first'
-                : micPermissionNeeded
-                  ? 'Tap anywhere to enable voice standby'
-                  : standbyWakeEnabled
-                    ? 'Standby • Speak your secret wake code'
-                    : 'Standby listener muted'}
+            {standbyHeardText
+              ? `Heard: "${standbyHeardText}"`
+              : isThinking
+                ? 'Verifying & connecting...'
+                : needsVoiceCodeSetup
+                  ? 'Set your private voice codes first'
+                  : micPermissionNeeded
+                    ? 'Tap anywhere to enable voice standby'
+                    : standbyWakeEnabled
+                      ? 'Standby • Speak your secret wake code'
+                      : 'Standby listener muted'}
           </span>
 
           {standbyListening && standbyAudioDetected && !micPermissionNeeded && (

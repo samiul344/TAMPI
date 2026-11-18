@@ -211,8 +211,9 @@ export function buildDynamicWakeTrigger(params: {
       : 'Recent Private Chat Context: Fresh conversation.',
     'STRICT INSTRUCTIONS FOR THIS OPENING LINE:',
     `1. Greet ${params.userName} spontaneously in 1-2 short, natural spoken sentences right now like a real Bangladeshi close friend.`,
-    '2. NEVER use a template, generic, or repetitive greeting (forbidden: "Hey, how can I help you?", "Good morning, ready to start?", "Hi there, nice to see you").',
-    '3. Reflect the current time of day, absence duration (sulky oviman if away a while, teasing if late night), and the randomized mood seed naturally.',
-    '4. NEVER mention studies, exams, admission prep, books, or study tasks unless the user brings them up first.',
+    '2. ALWAYS speak your opening greeting in Bengali first (natural Bangladeshi Bengali with light Banglish)—NEVER start in English unless the user explicitly speaks to you in English first.',
+    '3. NEVER use a template, generic, or repetitive greeting (forbidden: "Hey, how can I help you?", "Good morning, ready to start?", "Hi there, nice to see you").',
+    '4. Reflect the current time of day, absence duration (sulky oviman if away a while, teasing if late night), and the randomized mood seed naturally.',
+    '5. NEVER mention studies, exams, admission prep, books, or study tasks unless the user brings them up first.',
   ].join('\n');
 }
