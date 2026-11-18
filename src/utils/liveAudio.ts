@@ -4,6 +4,8 @@ import {
   LipSyncWeights,
   LiveVoiceName,
   MemoryItem,
+  SearchSource,
+  SmartNote,
   StructuredAction,
   StudyTask,
 } from '../types/tampi';
@@ -79,9 +81,24 @@ export interface LiveSessionHandlers {
   onInputTranscript: (text: string) => void;
   onOutputTranscript: (text: string) => void;
   onSpeakingChange: (speaking: boolean) => void;
+  onTurnComplete?: () => void;
   onAction: (action: StructuredAction) => void;
+  onSearching?: (query: string) => void;
+  onSearchResults?: (query: string, sources: SearchSource[]) => void;
   onError: (message: string) => void;
   onClosed: () => void;
+}
+
+interface FarewellState {
+  active: boolean;
+  audioStarted: boolean;
+  turnCompleted: boolean;
+  settled: boolean;
+  onFarewellDone: () => void;
+  onFallbackNeeded: () => void;
+  startWatchdogTimer: number | null;
+  settleTimer: number | null;
+  maxCapTimer: number | null;
 }
 
 export class GeminiLiveClient {
@@ -98,6 +115,7 @@ export class GeminiLiveClient {
   private nextStartTime = 0;
   private muted = false;
   private isDisconnected = false;
+  private farewellState: FarewellState | null = null;
   private handlers: LiveSessionHandlers;
 
   constructor(handlers: LiveSessionHandlers) {
@@ -107,84 +125,112 @@ export class GeminiLiveClient {
   public async connect(config: {
     userName?: string;
     persona: string;
-    memories: MemoryItem[];
-    tasks: StudyTask[];
+    memories?: MemoryItem[];
+    notes?: SmartNote[];
+    tasks?: StudyTask[];
     localDateTime: string;
+    localIsoWithOffset?: string;
     language: LanguageCode;
     voiceName: LiveVoiceName;
-    history: ChatTurn[];
+    history?: ChatTurn[];
     wakeTrigger?: string;
   }): Promise<void> {
     this.disconnect();
     this.isDisconnected = false;
 
-    // 1. Acquire & Resume Unlocked Playback AudioContext Immediately on Wake-Up
-    this.outputCtx = await acquireUnlockedOutputAudioContext();
-    await this.outputCtx.resume();
-    this.analyser = this.outputCtx.createAnalyser();
-    this.analyser.fftSize = 256;
-    this.analyser.smoothingTimeConstant = 0.55;
-    this.analyser.connect(this.outputCtx.destination);
-    this.freqData = new Uint8Array(
-      new ArrayBuffer(this.analyser.frequencyBinCount),
-    );
-
-    this.micStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
-
-    if (this.isDisconnected) return;
-
-    this.inputCtx = new AudioContext({ sampleRate: 16000 });
-    await this.inputCtx.resume();
-
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/live`;
-    this.ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(wsUrl);
+    this.ws = ws;
 
-    this.ws.onopen = () => {
+    // Prepare output AudioContext and mic capture in parallel while WebSocket + Gemini Live connect
+    const outputReadyPromise = (async () => {
+      const ctx = await acquireUnlockedOutputAudioContext();
       if (this.isDisconnected) return;
-      this.ws?.send(
+      this.outputCtx = ctx;
+      if (ctx.state === 'suspended') {
+        await ctx.resume();
+      }
+      if (this.isDisconnected) return;
+      this.analyser = ctx.createAnalyser();
+      this.analyser.fftSize = 256;
+      this.analyser.smoothingTimeConstant = 0.55;
+      this.analyser.connect(ctx.destination);
+      this.freqData = new Uint8Array(
+        new ArrayBuffer(this.analyser.frequencyBinCount),
+      );
+    })();
+
+    const micReadyPromise = (async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      if (this.isDisconnected) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      this.micStream = stream;
+      this.inputCtx = new AudioContext({ sampleRate: 16000 });
+      await this.inputCtx.resume();
+    })();
+
+    ws.onopen = () => {
+      if (this.isDisconnected) return;
+      ws.send(
         JSON.stringify({
           type: 'init',
           userName: config.userName,
           persona: config.persona,
-          memories: config.memories.map((m) => ({
+          memories: (config.memories ?? []).map((m) => ({
             category: m.category,
             content: m.content,
           })),
-          tasks: config.tasks.map((t) => ({
+          notes: (config.notes ?? []).map((n) => ({
+            kind: n.kind,
+            content: n.content,
+            remindAt: n.remindAt,
+            dueLabel: n.dueLabel,
+            completed: n.completed,
+          })),
+          tasks: (config.tasks ?? []).map((t) => ({
             title: t.title,
             subject: t.subject,
             dueLabel: t.dueLabel,
             completed: t.completed,
           })),
           localDateTime: config.localDateTime,
+          localIsoWithOffset:
+            config.localIsoWithOffset ?? new Date().toISOString(),
           language: config.language,
           voiceName: config.voiceName,
-          history: config.history.map((h) => ({
+          history: (config.history ?? []).map((h) => ({
             role: h.role,
             text: h.text,
           })),
+          wakeTrigger: config.wakeTrigger,
         }),
       );
     };
 
-    this.ws.onmessage = async (event) => {
+    ws.onmessage = async (event) => {
       if (this.isDisconnected) return;
       const msg = JSON.parse(event.data) as {
         type: string;
         audio?: string;
         text?: string;
+        query?: string;
+        sources?: SearchSource[];
         action?: StructuredAction;
         error?: string;
       };
 
       if (msg.type === 'ready') {
+        await outputReadyPromise.catch(() => {});
+        if (this.isDisconnected) return;
         if (this.outputCtx && this.outputCtx.state === 'suspended') {
           try {
             await this.outputCtx.resume();
@@ -192,59 +238,92 @@ export class GeminiLiveClient {
             // ignore resume errors
           }
         }
-
         if (config.wakeTrigger) {
-          // Wait 200ms after Gemini Live onopen ('ready') for audio output readiness,
-          // play a subtle 0.5s Stark HUD charging SFX, and trigger Tampi to speak FIRST
-          await new Promise((resolve) => setTimeout(resolve, 200));
-          if (
-            this.isDisconnected ||
-            !this.ws ||
-            this.ws.readyState !== WebSocket.OPEN
-          ) {
-            return;
-          }
           playPreSpeechHudSfx();
-          this.ws.send(
-            JSON.stringify({
-              type: 'text',
-              text: config.wakeTrigger,
-              turnComplete: true,
-            }),
-          );
         }
-
+        await micReadyPromise.catch(() => {});
+        if (this.isDisconnected) return;
         this.startMicCapture();
         this.handlers.onReady();
       } else if (msg.type === 'audio' && msg.audio) {
+        await outputReadyPromise.catch(() => {});
+        if (this.isDisconnected) return;
+        if (this.farewellState?.active && !this.farewellState.settled) {
+          this.farewellState.audioStarted = true;
+          if (this.farewellState.startWatchdogTimer !== null) {
+            window.clearTimeout(this.farewellState.startWatchdogTimer);
+            this.farewellState.startWatchdogTimer = null;
+          }
+          if (this.farewellState.settleTimer !== null) {
+            window.clearTimeout(this.farewellState.settleTimer);
+            this.farewellState.settleTimer = null;
+          }
+        }
         this.enqueuePlayback(msg.audio);
       } else if (msg.type === 'inputTranscript' && msg.text) {
-        if (this.activeSources.size > 0) {
-          this.flushPlayback();
+        if (!this.farewellState?.active) {
+          if (this.activeSources.size > 0) {
+            this.flushPlayback();
+          }
+          this.handlers.onInputTranscript(msg.text);
         }
-        this.handlers.onInputTranscript(msg.text);
       } else if (msg.type === 'outputTranscript' && msg.text) {
         this.handlers.onOutputTranscript(msg.text);
       } else if (msg.type === 'interrupted') {
         this.flushPlayback();
+        if (this.farewellState?.active && !this.farewellState.settled) {
+          this.farewellState.audioStarted = false;
+          this.farewellState.turnCompleted = false;
+        }
+      } else if (msg.type === 'turnComplete') {
+        if (this.farewellState?.active && !this.farewellState.settled) {
+          this.farewellState.turnCompleted = true;
+          this.maybeCompleteFarewell();
+        }
+        this.handlers.onTurnComplete?.();
+      } else if (msg.type === 'searching' && msg.query) {
+        this.handlers.onSearching?.(msg.query);
+      } else if (msg.type === 'searchResults') {
+        this.handlers.onSearchResults?.(
+          msg.query ?? '',
+          Array.isArray(msg.sources) ? msg.sources : [],
+        );
       } else if (msg.type === 'action' && msg.action) {
         this.handlers.onAction(msg.action);
       } else if (msg.type === 'error' && msg.error) {
-        this.handlers.onError(msg.error);
+        if (this.farewellState?.active && !this.farewellState.settled) {
+          this.triggerFarewellFallback();
+        } else {
+          this.handlers.onError(msg.error);
+        }
       } else if (msg.type === 'closed') {
+        if (this.farewellState?.active && !this.farewellState.settled) {
+          this.triggerFarewellFallback();
+        } else {
+          this.handlers.onClosed();
+        }
+      }
+    };
+
+    ws.onerror = () => {
+      if (this.isDisconnected) return;
+      if (this.farewellState?.active && !this.farewellState.settled) {
+        this.triggerFarewellFallback();
+      } else {
+        this.handlers.onError('WebSocket connection to Live voice service failed.');
+      }
+    };
+
+    ws.onclose = () => {
+      if (this.isDisconnected) return;
+      if (this.farewellState?.active && !this.farewellState.settled) {
+        this.triggerFarewellFallback();
+      } else {
         this.handlers.onClosed();
       }
     };
 
-    this.ws.onerror = () => {
-      if (this.isDisconnected) return;
-      this.handlers.onError('WebSocket connection to Live voice service failed.');
-    };
-
-    this.ws.onclose = () => {
-      if (this.isDisconnected) return;
-      this.handlers.onClosed();
-    };
+    await Promise.all([outputReadyPromise, micReadyPromise]);
   }
 
   private startMicCapture(): void {
@@ -305,8 +384,114 @@ export class GeminiLiveClient {
       this.activeSources.delete(source);
       if (this.activeSources.size === 0) {
         this.handlers.onSpeakingChange(false);
+        if (this.farewellState?.active && !this.farewellState.settled) {
+          this.maybeCompleteFarewell();
+        }
       }
     };
+  }
+
+  private clearFarewellTimers(): void {
+    if (!this.farewellState) return;
+    if (this.farewellState.startWatchdogTimer !== null) {
+      window.clearTimeout(this.farewellState.startWatchdogTimer);
+      this.farewellState.startWatchdogTimer = null;
+    }
+    if (this.farewellState.settleTimer !== null) {
+      window.clearTimeout(this.farewellState.settleTimer);
+      this.farewellState.settleTimer = null;
+    }
+    if (this.farewellState.maxCapTimer !== null) {
+      window.clearTimeout(this.farewellState.maxCapTimer);
+      this.farewellState.maxCapTimer = null;
+    }
+  }
+
+  private triggerFarewellFallback(): void {
+    const state = this.farewellState;
+    if (!state || state.settled) return;
+    state.settled = true;
+    state.active = false;
+    this.clearFarewellTimers();
+    this.farewellState = null;
+    state.onFallbackNeeded();
+  }
+
+  private maybeCompleteFarewell(): void {
+    const state = this.farewellState;
+    if (!state || !state.active || state.settled) return;
+    if (!state.audioStarted || !state.turnCompleted || this.activeSources.size > 0) {
+      return;
+    }
+    if (state.settleTimer !== null) {
+      window.clearTimeout(state.settleTimer);
+    }
+    state.settleTimer = window.setTimeout(() => {
+      if (!state.active || state.settled) return;
+      if (this.activeSources.size > 0) return;
+      state.settled = true;
+      state.active = false;
+      this.clearFarewellTimers();
+      this.farewellState = null;
+      state.onFarewellDone();
+    }, 240);
+  }
+
+  public beginShutdownFarewell(
+    prompt: string,
+    callbacks: {
+      onFarewellDone: () => void;
+      onFallbackNeeded: () => void;
+    },
+  ): void {
+    this.clearFarewellTimers();
+    this.muted = true;
+    this.flushPlayback();
+
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.isDisconnected) {
+      callbacks.onFallbackNeeded();
+      return;
+    }
+
+    const state: FarewellState = {
+      active: true,
+      audioStarted: false,
+      turnCompleted: false,
+      settled: false,
+      onFarewellDone: callbacks.onFarewellDone,
+      onFallbackNeeded: callbacks.onFallbackNeeded,
+      startWatchdogTimer: null,
+      settleTimer: null,
+      maxCapTimer: null,
+    };
+    this.farewellState = state;
+
+    state.startWatchdogTimer = window.setTimeout(() => {
+      if (!state.settled && !state.audioStarted) {
+        this.triggerFarewellFallback();
+      }
+    }, 2600);
+
+    state.maxCapTimer = window.setTimeout(() => {
+      if (!state.settled) {
+        state.settled = true;
+        state.active = false;
+        this.clearFarewellTimers();
+        this.farewellState = null;
+        if (state.audioStarted) {
+          state.onFarewellDone();
+        } else {
+          state.onFallbackNeeded();
+        }
+      }
+    }, 9500);
+
+    this.ws.send(
+      JSON.stringify({
+        type: 'shutdown_farewell',
+        text: prompt.trim(),
+      }),
+    );
   }
 
   public flushPlayback(): void {
@@ -392,6 +577,12 @@ export class GeminiLiveClient {
 
   public disconnect(): void {
     this.isDisconnected = true;
+    this.clearFarewellTimers();
+    if (this.farewellState) {
+      this.farewellState.settled = true;
+      this.farewellState.active = false;
+      this.farewellState = null;
+    }
     this.flushPlayback();
 
     if (this.processor) {

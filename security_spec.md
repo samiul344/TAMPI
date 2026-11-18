@@ -3,7 +3,7 @@
 ## 1. Data Invariants
 - Every user document under `/users/{userId}` and `/users/{userId}/settings/{settingId}` (including `secretWakePhrase`, `secretShutdownPhrase`, `voiceCodesConfigured`, `liveVoiceName`, `personaInstructions`, and `lastActiveAt`) can only be read, created, updated, or deleted by the verified authenticated owner (`request.auth != null && request.auth.uid == userId && request.auth.token.email_verified == true`), and `uid`/`userId` and `createdAt` are immutable after creation.
 - Listing `/users` is strictly disabled (`allow list: if false`) so no user can enumerate or scrape another user's profile or secret phrases.
-- Every subcollection document under `/users/{userId}/settings/{settingId}`, `/users/{userId}/memories/{memoryId}`, `/users/{userId}/history/{turnId}`, `/users/{userId}/tasks/{taskId}`, and `/users/{userId}/sessions/{sessionId}` must contain `userId == userId` (matching both path and `request.auth.uid`), adhere strictly to field allowlists and size bounds, and enforce `request.time` server timestamps on create.
+- Every subcollection document under `/users/{userId}/settings/{settingId}`, `/users/{userId}/memories/{memoryId}`, `/users/{userId}/notes/{noteId}`, `/users/{userId}/history/{turnId}`, `/users/{userId}/tasks/{taskId}`, and `/users/{userId}/sessions/{sessionId}` must contain `userId == userId` (matching both path and `request.auth.uid`), adhere strictly to field allowlists and size bounds, and enforce `request.time` server timestamps on create and `updatedAt == request.time` on update.
 - Default-deny catch-all (`match /{document=**} { allow read, write: if false; }`) rejects all unmapped paths including unauthenticated or cross-user access.
 
 ## 2. Adversarial "Dirty Dozen" Payloads

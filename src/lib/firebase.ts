@@ -2,6 +2,7 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, User } from 'firebase/auth';
 import {
   collection,
+  deleteField,
   deleteDoc,
   doc,
   getDoc,
@@ -21,6 +22,7 @@ import {
   ChatTurn,
   defaultVoice,
   MemoryItem,
+  SmartNote,
   StudySessionRecord,
   StudyTask,
   TampiSettings,
@@ -454,7 +456,7 @@ export function subscribeUserProfile(
   return onSnapshot(
     ref,
     (snap) => {
-      if (!snap.exists()) return;
+      if (!snap.exists() || snap.metadata.hasPendingWrites) return;
       const data = snap.data() as Record<string, unknown>;
       onSettingsLoaded(extractSettingsPatch(data));
     },
@@ -795,5 +797,151 @@ export async function addFirestoreSession(
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export function subscribeUserNotes(
+  uid: string,
+  onNotesLoaded: (notes: SmartNote[]) => void,
+  onError?: (err: Error) => void,
+): () => void {
+  const path = `users/${uid}/notes`;
+  const q = query(
+    collection(db, 'users', uid, 'notes'),
+    where('userId', '==', uid),
+  );
+
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const notes: SmartNote[] = snapshot.docs
+        .map((d) => {
+          const data = d.data();
+          const createdTs = data.createdAt?.toDate
+            ? data.createdAt.toDate().toISOString()
+            : new Date().toISOString();
+          const updatedTs = data.updatedAt?.toDate
+            ? data.updatedAt.toDate().toISOString()
+            : createdTs;
+          return {
+            id: d.id,
+            kind: (data.kind === 'reminder' ? 'reminder' : 'note') as
+              | 'note'
+              | 'reminder',
+            content: String(data.content ?? ''),
+            remindAt:
+              typeof data.remindAt === 'string' && data.remindAt
+                ? data.remindAt
+                : undefined,
+            dueLabel:
+              typeof data.dueLabel === 'string' && data.dueLabel
+                ? data.dueLabel
+                : undefined,
+            reminded: Boolean(data.reminded),
+            completed: Boolean(data.completed),
+            createdAt: createdTs,
+            updatedAt: updatedTs,
+          };
+        })
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      onNotesLoaded(notes);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, path);
+      } catch (e) {
+        onError?.(e as Error);
+      }
+    },
+  );
+}
+
+export async function addFirestoreNote(
+  uid: string,
+  note: SmartNote,
+): Promise<string> {
+  const noteId = sanitizeId(note.id, 'note');
+  const path = `users/${uid}/notes/${noteId}`;
+  const safeContent = clampString(note.content.trim(), 1000);
+  if (!safeContent) return noteId;
+
+  const payload: Record<string, unknown> = {
+    userId: uid,
+    kind: note.kind === 'reminder' ? 'reminder' : 'note',
+    content: safeContent,
+    reminded: Boolean(note.reminded),
+    completed: Boolean(note.completed),
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+  if (note.remindAt?.trim()) {
+    payload.remindAt = clampString(note.remindAt.trim(), 64);
+  }
+  if (note.dueLabel?.trim()) {
+    payload.dueLabel = clampString(note.dueLabel.trim(), 120);
+  }
+
+  try {
+    await setDoc(doc(db, 'users', uid, 'notes', noteId), payload);
+    return noteId;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export async function updateFirestoreNote(
+  uid: string,
+  noteId: string,
+  patch: Partial<
+    Pick<
+      SmartNote,
+      'kind' | 'content' | 'remindAt' | 'dueLabel' | 'reminded' | 'completed'
+    >
+  >,
+): Promise<void> {
+  const path = `users/${uid}/notes/${noteId}`;
+  const payload: Record<string, unknown> = {
+    updatedAt: serverTimestamp(),
+  };
+  if (patch.kind !== undefined) {
+    payload.kind = patch.kind === 'reminder' ? 'reminder' : 'note';
+  }
+  if (patch.content !== undefined) {
+    const safeContent = clampString(patch.content.trim(), 1000);
+    if (safeContent) payload.content = safeContent;
+  }
+  if ('remindAt' in patch) {
+    payload.remindAt = patch.remindAt?.trim()
+      ? clampString(patch.remindAt.trim(), 64)
+      : deleteField();
+  }
+  if ('dueLabel' in patch) {
+    payload.dueLabel = patch.dueLabel?.trim()
+      ? clampString(patch.dueLabel.trim(), 120)
+      : deleteField();
+  }
+  if (patch.reminded !== undefined) {
+    payload.reminded = Boolean(patch.reminded);
+  }
+  if (patch.completed !== undefined) {
+    payload.completed = Boolean(patch.completed);
+  }
+
+  try {
+    await updateDoc(doc(db, 'users', uid, 'notes', noteId), payload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function deleteFirestoreNote(
+  uid: string,
+  noteId: string,
+): Promise<void> {
+  const path = `users/${uid}/notes/${noteId}`;
+  try {
+    await deleteDoc(doc(db, 'users', uid, 'notes', noteId));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
   }
 }

@@ -102,6 +102,37 @@ const HAPPY_PATTERNS = [
   /\bcongrats\b/i,
 ];
 
+const SAD_PATTERNS = [
+  /মন খারাপ/i,
+  /ভালো লাগছে না/i,
+  /ভাল লাগছে না/i,
+  /মন ভালো নেই/i,
+  /কষ্ট/i,
+  /একা/i,
+  /কান্না/i,
+  /হতাশ/i,
+  /ক্লান্ত/i,
+  /দুঃখ/i,
+  /ব্যথা/i,
+  /খারাপ লাগছে/i,
+  /\bmon kharap\b/i,
+  /\bvalo lagche na\b/i,
+  /\bbhalo lagche na\b/i,
+  /\bkosto\b/i,
+  /\beka lagche\b/i,
+  /\bsad\b/i,
+  /\bupset\b/i,
+  /\bdepressed\b/i,
+  /\blonely\b/i,
+  /\bhurt\b/i,
+  /\bdown today\b/i,
+  /\bfeeling down\b/i,
+  /\bexhausted\b/i,
+  /\bheartbroken\b/i,
+  /\bsorry to hear\b/i,
+  /\bmon kharap koro na\b/i,
+];
+
 export function detectEmotionFromTranscript(
   text: string,
   audioAmplitude = 0,
@@ -111,6 +142,9 @@ export function detectEmotionFromTranscript(
 
   if (SULKING_PATTERNS.some((re) => re.test(clean))) {
     return 'sulking';
+  }
+  if (SAD_PATTERNS.some((re) => re.test(clean))) {
+    return 'sad';
   }
   if (SHY_PATTERNS.some((re) => re.test(clean))) {
     return 'shy';
@@ -124,6 +158,32 @@ export function detectEmotionFromTranscript(
 
   // Fallback vocal tone heuristics from punctuation/energy
   if (clean.includes('!') && audioAmplitude > 0.42) {
+    return 'happy';
+  }
+
+  return 'neutral';
+}
+
+export function detectUserMoodFromTranscript(
+  text: string,
+  audioAmplitude = 0,
+): AvatarEmotion {
+  const clean = text.trim();
+  if (!clean) return 'neutral';
+
+  if (SAD_PATTERNS.some((re) => re.test(clean))) {
+    return 'sad';
+  }
+  if (SULKING_PATTERNS.some((re) => re.test(clean))) {
+    return 'sulking';
+  }
+  if (ANGRY_PATTERNS.some((re) => re.test(clean))) {
+    return 'angry';
+  }
+  if (HAPPY_PATTERNS.some((re) => re.test(clean))) {
+    return 'happy';
+  }
+  if (clean.includes('!') || audioAmplitude > 0.55) {
     return 'happy';
   }
 

@@ -538,6 +538,7 @@ export function matchesShutdownPhrase(
 }
 
 let sharedOutputCtx: AudioContext | null = null;
+let pendingGestureResumeCleanup: (() => void) | null = null;
 
 function createOutputAudioContext(): AudioContext | null {
   const AudioCtx =
@@ -550,6 +551,53 @@ function createOutputAudioContext(): AudioContext | null {
   } catch {
     return new AudioCtx();
   }
+}
+
+export function scheduleAudioContextResumeOnGesture(
+  onResumed?: () => void,
+): void {
+  if (typeof window === 'undefined') return;
+  if (sharedOutputCtx && sharedOutputCtx.state === 'running') {
+    onResumed?.();
+    return;
+  }
+  if (pendingGestureResumeCleanup) {
+    pendingGestureResumeCleanup();
+    pendingGestureResumeCleanup = null;
+  }
+
+  const attemptResume = () => {
+    if (!sharedOutputCtx || sharedOutputCtx.state === 'closed') {
+      sharedOutputCtx = createOutputAudioContext();
+    }
+    const ctx = sharedOutputCtx;
+    if (!ctx) return;
+    void ctx
+      .resume()
+      .then(() => {
+        if (ctx.state === 'running') {
+          cleanup();
+          onResumed?.();
+        }
+      })
+      .catch(() => {
+        // Ignore until a valid gesture occurs
+      });
+  };
+
+  const cleanup = () => {
+    window.removeEventListener('pointerdown', attemptResume, true);
+    window.removeEventListener('keydown', attemptResume, true);
+    window.removeEventListener('touchstart', attemptResume, true);
+    if (pendingGestureResumeCleanup === cleanup) {
+      pendingGestureResumeCleanup = null;
+    }
+  };
+
+  pendingGestureResumeCleanup = cleanup;
+  window.addEventListener('pointerdown', attemptResume, { capture: true, passive: true });
+  window.addEventListener('keydown', attemptResume, { capture: true, passive: true });
+  window.addEventListener('touchstart', attemptResume, { capture: true, passive: true });
 }
 
 /**
@@ -566,7 +614,10 @@ export async function acquireUnlockedOutputAudioContext(): Promise<AudioContext>
     try {
       await sharedOutputCtx.resume();
     } catch {
-      // Ignore if resume needs a gesture; silent buffer prime below still helps
+      // Ignore if resume needs a gesture; silent buffer prime + gesture hook below handles it
+    }
+    if (sharedOutputCtx.state === 'suspended') {
+      scheduleAudioContextResumeOnGesture();
     }
   }
   return sharedOutputCtx;
@@ -583,7 +634,9 @@ export function unlockAudioPlayback(): void {
     if (!sharedOutputCtx) return;
     const ctx = sharedOutputCtx;
     if (ctx.state === 'suspended') {
-      void ctx.resume();
+      void ctx.resume().catch(() => {
+        scheduleAudioContextResumeOnGesture();
+      });
     }
     const silentBuffer = ctx.createBuffer(1, 1, ctx.sampleRate || 24000);
     const src = ctx.createBufferSource();
@@ -601,7 +654,7 @@ function getOrInitPlaybackContext(): {
 } | null {
   if (sharedOutputCtx && sharedOutputCtx.state !== 'closed') {
     if (sharedOutputCtx.state === 'suspended') {
-      void sharedOutputCtx.resume();
+      void sharedOutputCtx.resume().catch(() => {});
     }
     return { ctx: sharedOutputCtx, ephemeral: false };
   }
@@ -609,7 +662,7 @@ function getOrInitPlaybackContext(): {
   if (!created) return null;
   sharedOutputCtx = created;
   if (sharedOutputCtx.state === 'suspended') {
-    void sharedOutputCtx.resume();
+    void sharedOutputCtx.resume().catch(() => {});
   }
   return { ctx: sharedOutputCtx, ephemeral: false };
 }

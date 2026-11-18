@@ -264,6 +264,51 @@
         }
       },
       "required": ["userId", "label", "durationMinutes", "completedAt"]
+    },
+    "SmartNote": {
+      "title": "SmartNote",
+      "description": "Smart note or scheduled reminder stored privately in the user's Firestore Vault.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["note", "reminder"]
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "remindAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "dueLabel": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "reminded": {
+          "type": "boolean"
+        },
+        "completed": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "kind", "content", "reminded", "completed", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -278,6 +323,10 @@
     "/users/{userId}/memories/{memoryId}": {
       "schema": { "$ref": "#/entities/MemoryNote" },
       "description": "User-owned personal memory notes and reminders."
+    },
+    "/users/{userId}/notes/{noteId}": {
+      "schema": { "$ref": "#/entities/SmartNote" },
+      "description": "User-owned Smart Notes and scheduled proactive reminders in the Firestore Vault."
     },
     "/users/{userId}/history/{turnId}": {
       "schema": { "$ref": "#/entities/ChatTurnRecord" },

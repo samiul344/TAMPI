@@ -176,6 +176,24 @@ service cloud.firestore {
         && data.completedAt is timestamp;
     }
 
+    function isValidSmartNote(data, userId) {
+      return data.keys().hasAll(['userId', 'kind', 'content', 'reminded', 'completed', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'kind', 'content', 'remindAt', 'dueLabel', 'reminded', 'completed', 'createdAt', 'updatedAt'])
+        && data.userId is string
+        && data.userId == userId
+        && isValidId(data.userId)
+        && data.kind in ['note', 'reminder']
+        && data.content is string
+        && data.content.size() >= 1
+        && data.content.size() <= 1000
+        && (!('remindAt' in data) || (data.remindAt is string && data.remindAt.size() <= 64))
+        && (!('dueLabel' in data) || (data.dueLabel is string && data.dueLabel.size() <= 120))
+        && data.reminded is bool
+        && data.completed is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     match /users/{userId} {
       allow get: if isVerifiedOwner(userId) && isValidId(userId);
       allow list: if false;
@@ -279,6 +297,29 @@ service cloud.firestore {
           && incoming().diff(existing()).affectedKeys().hasOnly(['category', 'content']);
 
         allow delete: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(memoryId);
+      }
+
+      match /notes/{noteId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(noteId);
+        allow list: if isVerifiedOwner(userId) && resource.data.userId == request.auth.uid;
+
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(noteId)
+          && isValidSmartNote(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+
+        allow update: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(noteId)
+          && isValidSmartNote(incoming(), userId)
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['kind', 'content', 'remindAt', 'dueLabel', 'reminded', 'completed', 'updatedAt']);
+
+        allow delete: if isVerifiedOwner(userId) && isValidId(userId) && isValidId(noteId);
       }
 
       match /history/{turnId} {

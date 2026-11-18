@@ -3,6 +3,8 @@ import {
   ChatTurn,
   LanguageCode,
   MemoryItem,
+  SmartNote,
+  StudyTask,
   WakeMoodSeed,
 } from '../types/tampi';
 
@@ -193,10 +195,19 @@ function extractOpeningPrefix(text: string): string {
   return cleaned.split(' ').slice(0, 3).join(' ');
 }
 
+export const TAMPI_WAKE_INTRO_BN =
+  'Neural core online. System diagnostics at 100%, Boss. Tampi version 1.0 is live and synced. আপনার আজকের মিশন কী?';
+
+export const TAMPI_WAKE_INTRO_EN =
+  'Neural core online. System diagnostics at 100%, Boss. Tampi version 1.0 is live and synced. What is your mission today?';
+
 export function buildDynamicWakeTrigger(params: {
   userName: string;
   language: LanguageCode;
   memories: MemoryItem[];
+  notes?: SmartNote[];
+  tasks?: StudyTask[];
+  isFirstWakeToday?: boolean;
   history: ChatTurn[];
   lastActiveAt?: string | null;
   moodSeed: WakeMoodSeed;
@@ -204,102 +215,51 @@ export function buildDynamicWakeTrigger(params: {
   wakeStyleIndex?: number;
   now?: Date;
 }): string {
-  const now = params.now ?? new Date();
-  const timeInfo = getTimeOfDayInfo(now);
-  const awayStatus = formatAwayDuration(params.lastActiveAt, now);
+  const isEnglish = params.language === 'en-US';
+  const introLine = isEnglish ? TAMPI_WAKE_INTRO_EN : TAMPI_WAKE_INTRO_BN;
 
-  const recentMemories = params.memories
-    .slice(0, 3)
-    .map((m) => `- [${m.category}] ${m.content}`)
-    .join('\n');
+  const pendingNotes = (params.notes ?? []).filter((n) => !n.completed);
+  const briefingLines = pendingNotes.slice(0, 6).map((n) => {
+    const timePart = n.dueLabel
+      ? ` (${n.dueLabel})`
+      : n.remindAt
+        ? ` (${new Date(n.remindAt).toLocaleString([], {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          })})`
+        : '';
+    return `- [${n.kind}] ${n.content}${timePart}`;
+  });
 
-  const recentChat = params.history
-    .slice(-3)
-    .map(
-      (turn) =>
-        `- ${turn.role === 'user' ? params.userName : 'Tampi'}: ${turn.text}`,
-    )
-    .join('\n');
+  const timeInfo = getTimeOfDayInfo(params.now);
+  const awayStr = formatAwayDuration(params.lastActiveAt, params.now);
+  const moodHint = MOOD_GUIDANCE[params.moodSeed] || '';
 
-  const langLabel =
-    params.language === 'bn-BD'
-      ? 'Bangladeshi Banglish / Bengali'
-      : 'Warm English with natural Bangladeshi warmth';
-
-  const historyModelOpenings = params.history
-    .filter((turn) => turn.role === 'model')
-    .slice(-5)
-    .map((turn) => turn.text.trim())
-    .filter(Boolean);
-
-  const pastOpenings = [
-    ...(params.recentWakeOpenings ?? []),
-    ...historyModelOpenings,
+  const lines: string[] = [
+    '[SYSTEM_WAKE_ACTIVATION — SPEAK IMMEDIATELY]',
+    `Speak FIRST right now. Say this exact intro line aloud naturally with crisp Stark co-pilot confidence${isEnglish ? '' : ' and natural Bangladeshi pronunciation'}: "${introLine}"`,
+    `Context: Local time is ${timeInfo.fullLocalDateTime}. ${awayStr} Mood color: ${moodHint}`,
   ];
-  const uniqueOpenings: string[] = [];
-  const seenNormalized = new Set<string>();
-  for (const line of pastOpenings) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const norm = trimmed.toLowerCase();
-    if (seenNormalized.has(norm)) continue;
-    seenNormalized.add(norm);
-    uniqueOpenings.push(trimmed);
-  }
-  const bannedLines = uniqueOpenings.slice(-10);
 
-  const bannedStarters = Array.from(
-    new Set(
-      bannedLines
-        .map((line) => extractOpeningPrefix(line))
-        .filter((prefix) => prefix.length >= 2),
-    ),
+  if (params.isFirstWakeToday) {
+    if (briefingLines.length > 0) {
+      lines.push(
+        `[AUTO DAILY BRIEFING — FIRST WAKE OF THE DAY]: Immediately right after speaking the exact intro line above, smoothly deliver a crisp 1-2 sentence Daily Briefing of the user's pending Smart Notes & Reminders below (in ${isEnglish ? 'English' : 'natural Bangladeshi Bangla'}):\n${briefingLines.join('\n')}`,
+      );
+    } else {
+      lines.push(
+        `[AUTO DAILY BRIEFING — FIRST WAKE OF THE DAY]: Immediately right after speaking the exact intro line above, briefly note in 1 friendly sentence (${isEnglish ? 'in English' : 'in natural Bangladeshi Bangla'}) that today's notes & reminders vault is completely clear so they have a fresh slate.`,
+      );
+    }
+  }
+
+  lines.push(
+    isEnglish
+      ? 'Keep subsequent replies in smart, conversational English unless the user switches languages.'
+      : 'PRIMARY LANGUAGE RULE: Immediately after finishing this intro line, speak and reply primarily in natural Bangladeshi Bangla (বাংলা) for all following turns, unless the user explicitly speaks or switches to English.',
   );
 
-  const styleIdx =
-    typeof params.wakeStyleIndex === 'number' &&
-    params.wakeStyleIndex >= 0 &&
-    params.wakeStyleIndex < WAKE_ARCHETYPES.length
-      ? params.wakeStyleIndex
-      : pickNextWakeArchetypeIndex(null);
-
-  const chosenArchetype = WAKE_ARCHETYPES[styleIdx];
-  const entropyToken = `${now.getMinutes()}${now.getSeconds()}-${Math.floor(Math.random() * 9000 + 1000)}`;
-
-  return [
-    '[HIDDEN_SYSTEM_WAKE_EVENT — DO NOT READ TAGS OR METADATA ALOUD]',
-    `${params.userName} just unlocked your voice core and activated Tampi 1.0. You MUST speak FIRST immediately.`,
-    `User Name: ${params.userName}`,
-    `Preferred Vibe/Language: ${langLabel}`,
-    `Current Local Time & Day: ${timeInfo.fullLocalDateTime} (${timeInfo.dayOfWeek}, ${timeInfo.formattedTime}, period: ${timeInfo.period})`,
-    `Time Context: ${timeInfo.timeGuidance}`,
-    `Absence / Gap Since Last Chat: ${awayStatus}`,
-    `Randomized Mood Seed: ${params.moodSeed} — ${MOOD_GUIDANCE[params.moodSeed]}`,
-    `Required Opening Archetype #${styleIdx + 1} (entropy ${entropyToken}): ${chosenArchetype}`,
-    recentMemories
-      ? `Recent Private Memories for ${params.userName} (last 2-3):\n${recentMemories}`
-      : `Recent Private Memories for ${params.userName}: None saved yet.`,
-    recentChat
-      ? `Recent Private Chat Context (last 2-3 turns):\n${recentChat}`
-      : 'Recent Private Chat Context: Fresh conversation.',
-    bannedLines.length > 0
-      ? `DO NOT REPEAT OR PARAPHRASE ANY OF THESE PREVIOUS OPENINGS:\n${bannedLines
-          .map((line) => `- "${line}"`)
-          .join('\n')}`
-      : '',
-    bannedStarters.length > 0
-      ? `FORBIDDEN STARTING WORDS (you MUST invent brand-new first words and MUST NOT start with any of these): ${bannedStarters
-          .map((s) => `"${s}"`)
-          .join(', ')}`
-      : '',
-    'STRICT INSTRUCTIONS FOR THIS OPENING LINE:',
-    `1. Speak FIRST right now! Improvise a 100% ORIGINAL, never-heard-before 1-2 sentence greeting for ${params.userName} matching Archetype #${styleIdx + 1} above.`,
-    '2. Blend Tony Stark J.A.R.V.I.S./F.R.I.D.A.Y. confidence and sharp wit with warm, natural Bangladeshi Banglish — NEVER sound generic, scripted, or robotic, and NEVER read brackets or metadata aloud.',
-    '3. Start with fresh vocabulary and sentence structure every single activation — vary how you open (sometimes Bengali first, sometimes crisp Stark tech term first, sometimes teasing observation first, sometimes a direct clock/mood remark) AND vary your closing question.',
-    '4. Use natural spoken pauses (commas `,`, em-dashes `—`, brief ellipses `...`) so your delivery sounds poised, expressive, and cinematic.',
-    '5. Reflect the current local hour, absence gap (subtle cute oviman if away a while, playful scolding if after midnight), and mood seed naturally.',
-    '6. NEVER mention studies, exams, admission prep, books, or study tasks unless the user brings them up first.',
-  ]
-    .filter(Boolean)
-    .join('\n');
+  return lines.join('\n');
 }

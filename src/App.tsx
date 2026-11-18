@@ -5,6 +5,7 @@ import {
   Mic,
   MicOff,
   Moon,
+  ShieldAlert,
   ShieldCheck,
 } from 'lucide-react';
 import {
@@ -18,18 +19,26 @@ import { StarkHud } from './components/StarkHud';
 import { TopBar } from './components/TopBar';
 import { VoiceDock } from './components/VoiceDock';
 import { MemoryDrawer } from './components/MemoryDrawer';
+import { NotesVaultDrawer } from './components/NotesVaultDrawer';
 import { SettingsModal } from './components/SettingsModal';
 import { VoiceCommandsModal } from './components/VoiceCommandsModal';
+import { ChatDrawer } from './components/ChatDrawer';
 import {
   AssistantState,
   AvatarEmotion,
+  CHATBOT_ROLE_PRESETS,
+  ChatbotMessage,
+  ChatbotRoleId,
   ChatApiResponse,
+  ChatTaskMode,
   ChatTurn,
   defaultVoice,
   LanguageCode,
   LipSyncWeights,
   MemoryItem,
   migratePersonaIfLegacyDefault,
+  SearchSource,
+  SmartNote,
   StructuredAction,
   StudySessionRecord,
   StudyTask,
@@ -41,38 +50,49 @@ import {
 import {
   addFirestoreHistoryTurn,
   addFirestoreMemory,
+  addFirestoreNote,
   addFirestoreSession,
   addFirestoreTask,
   auth,
   clearFirestoreHistory,
   deleteFirestoreMemory,
+  deleteFirestoreNote,
   deleteFirestoreTask,
   ensureAndSyncUserProfile,
   googleAuthProvider,
   saveUserVoiceCommands,
   subscribeUserHistory,
   subscribeUserMemories,
+  subscribeUserNotes,
   subscribeUserProfile,
   subscribeUserSessions,
   subscribeUserTasks,
   toggleFirestoreTask,
   touchUserLastActive,
+  updateFirestoreNote,
 } from './lib/firebase';
 import {
+  clearChatbotMessages,
   clearHistoryStorage,
+  loadChatbotMessages,
   loadHistory,
   loadLastActiveAt,
+  loadLastBriefingDate,
   loadLastWakeStyleIndex,
   loadMemories,
+  loadNotes,
   loadRecentWakeOpenings,
   loadSessions,
   loadSettings,
   loadTasks,
   purgeLegacyUnscopedVoiceStorage,
+  saveChatbotMessages,
   saveHistory,
   saveLastActiveAt,
+  saveLastBriefingDate,
   saveLastWakeStyleIndex,
   saveMemories,
+  saveNotes,
   saveRecentWakeOpening,
   saveSessions,
   saveSettings,
@@ -92,12 +112,16 @@ import {
 import {
   matchesPhraseList,
   matchesStandalonePhraseList,
+  normalizeSpeechText,
   parseVoicePhraseList,
   playShutdownChime,
   playWakeAuthChime,
   unlockAudioPlayback,
 } from './utils/wakeWord';
-import { detectEmotionFromTranscript } from './utils/emotion';
+import {
+  detectEmotionFromTranscript,
+  detectUserMoodFromTranscript,
+} from './utils/emotion';
 import { GeminiLiveClient } from './utils/liveAudio';
 import {
   buildDynamicWakeTrigger,
@@ -105,6 +129,18 @@ import {
   pickNextMoodSeed,
   pickNextWakeArchetypeIndex,
 } from './utils/wakeContext';
+import {
+  playAccessDeniedAlertChime,
+  playReminderAlertChime,
+  playStandbyPromptChime,
+  playTimerCompleteAlarm,
+  setFocusHumEnabled,
+  speakFallbackUtterance,
+  speakFarewellFallback,
+  speakStandbySecurityWarning,
+  speakStandbySystemPrompt,
+  subscribeFocusHumState,
+} from './utils/soundscape';
 
 const EMPTY_LIP_SYNC: LipSyncWeights = {
   amplitude: 0,
@@ -136,6 +172,28 @@ function getLocalDateTimeLabel(): string {
   });
 }
 
+function getLocalIsoWithOffset(date = new Date()): string {
+  const tzOffsetMins = -date.getTimezoneOffset();
+  const sign = tzOffsetMins >= 0 ? '+' : '-';
+  const absMins = Math.abs(tzOffsetMins);
+  const offHours = String(Math.floor(absMins / 60)).padStart(2, '0');
+  const offMins = String(absMins % 60).padStart(2, '0');
+  const yr = date.getFullYear();
+  const mo = String(date.getMonth() + 1).padStart(2, '0');
+  const dy = String(date.getDate()).padStart(2, '0');
+  const hr = String(date.getHours()).padStart(2, '0');
+  const mn = String(date.getMinutes()).padStart(2, '0');
+  const sc = String(date.getSeconds()).padStart(2, '0');
+  return `${yr}-${mo}-${dy}T${hr}:${mn}:${sc}${sign}${offHours}:${offMins}`;
+}
+
+function getLocalDateKey(date = new Date()): string {
+  const yr = date.getFullYear();
+  const mo = String(date.getMonth() + 1).padStart(2, '0');
+  const dy = String(date.getDate()).padStart(2, '0');
+  return `${yr}-${mo}-${dy}`;
+}
+
 function getUserDisplayName(currentUser: User | null): string {
   if (!currentUser) return 'Friend';
   const name = currentUser.displayName?.trim();
@@ -154,6 +212,7 @@ export default function App() {
   const [memories, setMemories] = useState<MemoryItem[]>(() =>
     loadMemories('guest'),
   );
+  const [notes, setNotes] = useState<SmartNote[]>(() => loadNotes('guest'));
   const [tasks, setTasks] = useState<StudyTask[]>(() => loadTasks('guest'));
   const [sessions, setSessions] = useState<StudySessionRecord[]>(() =>
     loadSessions('guest'),
@@ -170,13 +229,33 @@ export default function App() {
   const [captionText, setCaptionText] = useState<string>(STANDBY_CAPTION);
   const [interimTranscript, setInterimTranscript] = useState<string>('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [focusAudioActive, setFocusAudioActive] = useState(false);
+  const [searchQuery, setSearchQuery] = useState<string | null>(null);
+  const [searchSources, setSearchSources] = useState<SearchSource[]>([]);
 
   const [voiceCommandsOpen, setVoiceCommandsOpen] = useState(false);
   const [voiceSetupReady, setVoiceSetupReady] = useState(false);
   const [needsVoiceCodeSetup, setNeedsVoiceCodeSetup] = useState(true);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [miniWidget, setMiniWidget] = useState(false);
+
+  const [chatbotMessages, setChatbotMessages] = useState<ChatbotMessage[]>(() =>
+    loadChatbotMessages<ChatbotMessage>('guest'),
+  );
+  const [chatbotRoleId, setChatbotRoleId] = useState<ChatbotRoleId>('tampi');
+  const [chatbotCustomInstruction, setChatbotCustomInstruction] = useState(
+    () =>
+      CHATBOT_ROLE_PRESETS.find((r) => r.id === 'custom')?.systemInstruction ??
+      '',
+  );
+  const [chatbotTaskMode, setChatbotTaskMode] = useState<ChatTaskMode>('auto');
+  const [chatbotStreaming, setChatbotStreaming] = useState(false);
+  const [chatbotError, setChatbotError] = useState<string | null>(null);
+  const chatbotMessagesRef = useRef<ChatbotMessage[]>(chatbotMessages);
+  const chatbotAbortRef = useRef<AbortController | null>(null);
 
   const [liveConnected, setLiveConnected] = useState(false);
   const [liveMuted, setLiveMuted] = useState(false);
@@ -192,6 +271,9 @@ export default function App() {
   const [sleepHudVisible, setSleepHudVisible] = useState(false);
   const [sleepPulseKey, setSleepPulseKey] = useState(0);
   const [sleepSequenceActive, setSleepSequenceActive] = useState(false);
+  const [sleepPoweringDown, setSleepPoweringDown] = useState(false);
+  const [securityAlertVisible, setSecurityAlertVisible] = useState(false);
+  const [securityAlertPulseKey, setSecurityAlertPulseKey] = useState(0);
 
   const [timer, setTimer] = useState<StudyTimerState>({
     active: false,
@@ -210,6 +292,7 @@ export default function App() {
   const offPhrasesRef = useRef<string[]>([]);
   const shutdownPhrasesRef = offPhrasesRef;
   const memoriesRef = useRef(memories);
+  const notesRef = useRef(notes);
   const tasksRef = useRef(tasks);
   const historyRef = useRef(history);
   const liveClientRef = useRef<GeminiLiveClient | null>(null);
@@ -223,6 +306,7 @@ export default function App() {
   const standbyHeardTimerRef = useRef<number | null>(null);
   const standbyAudioDotTimerRef = useRef<number | null>(null);
   const wakePendingGreetingRef = useRef(false);
+  const pendingDailyBriefingDateRef = useRef<string | null>(null);
   const capturingWakeOpeningRef = useRef(false);
   const recentWakeOpeningsRef = useRef<string[]>([]);
   const activeWakeStyleIdxRef = useRef<number | null>(null);
@@ -230,10 +314,18 @@ export default function App() {
   const activeWakeMoodRef = useRef<WakeMoodSeed | null>(null);
   const lastActiveBeforeWakeRef = useRef<string | null>(null);
   const sleepSequenceActiveRef = useRef(false);
+  const sleepSequenceIdRef = useRef(0);
   const triggerSleepSequenceRef = useRef<() => void>(() => {});
   const shutdownDebounceTimerRef = useRef<number | null>(null);
   const lastInputTranscriptAtRef = useRef<number>(0);
   const standbyManuallyMutedRef = useRef(false);
+  const standbyPromptPlayedRef = useRef(false);
+  const standbyPromptAttemptedRef = useRef(false);
+  const suppressStandbyEchoUntilRef = useRef(0);
+  const wrongPasscodeCountRef = useRef(0);
+  const lastWrongPasscodeAtRef = useRef(0);
+  const securityCooldownUntilRef = useRef(0);
+  const securityAlertTimerRef = useRef<number | null>(null);
   const activeVrmBlobRef = useRef<string>('');
   const liveOutputBufferRef = useRef('');
   const liveInputBufferRef = useRef('');
@@ -245,6 +337,10 @@ export default function App() {
   useEffect(() => {
     userNameRef.current = userDisplayName;
   }, [userDisplayName]);
+
+  useEffect(() => {
+    return subscribeFocusHumState(setFocusAudioActive);
+  }, []);
 
   useEffect(() => {
     settingsRef.current = settings;
@@ -270,6 +366,13 @@ export default function App() {
   }, [memories, scopeKey]);
 
   useEffect(() => {
+    notesRef.current = notes;
+    if (scopeKeyRef.current === scopeKey) {
+      saveNotes(notes, scopeKey);
+    }
+  }, [notes, scopeKey]);
+
+  useEffect(() => {
     tasksRef.current = tasks;
     if (scopeKeyRef.current === scopeKey) {
       saveTasks(tasks, scopeKey);
@@ -288,6 +391,13 @@ export default function App() {
       saveHistory(history, scopeKey);
     }
   }, [history, scopeKey]);
+
+  useEffect(() => {
+    chatbotMessagesRef.current = chatbotMessages;
+    if (scopeKeyRef.current === scopeKey) {
+      saveChatbotMessages(chatbotMessages, scopeKey);
+    }
+  }, [chatbotMessages, scopeKey]);
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -382,6 +492,7 @@ export default function App() {
   }, [showToast]);
 
   const profileSyncTimerRef = useRef<number | null>(null);
+  const pendingSettingsWriteUntilRef = useRef<number>(0);
 
   const updateSettings = useCallback(
     (
@@ -389,6 +500,7 @@ export default function App() {
         | Partial<TampiSettings>
         | ((prev: TampiSettings) => TampiSettings),
     ) => {
+      pendingSettingsWriteUntilRef.current = Date.now() + 2500;
       if (
         typeof updater === 'object' &&
         typeof updater.customGlbUrl === 'string' &&
@@ -429,6 +541,7 @@ export default function App() {
           profileSyncTimerRef.current = window.setTimeout(() => {
             profileSyncTimerRef.current = null;
             if (userRef.current?.uid !== targetUid) return;
+            pendingSettingsWriteUntilRef.current = Date.now() + 2500;
             void ensureAndSyncUserProfile(userRef.current, next, true).catch(
               (err) => {
                 showToast(
@@ -446,10 +559,11 @@ export default function App() {
     [showToast],
   );
 
-  // Firebase Auth + Firestore profile, secret phrases (users/{uid}/settings), memories, tasks, sessions & chat history isolation
+  // Firebase Auth + Firestore profile, secret phrases (users/{uid}/settings), memories, notes, tasks, sessions & chat history isolation
   useEffect(() => {
     let unsubProfile: (() => void) | null = null;
     let unsubMemories: (() => void) | null = null;
+    let unsubNotes: (() => void) | null = null;
     let unsubHistory: (() => void) | null = null;
     let unsubTasks: (() => void) | null = null;
     let unsubSessions: (() => void) | null = null;
@@ -460,6 +574,8 @@ export default function App() {
       unsubProfile = null;
       unsubMemories?.();
       unsubMemories = null;
+      unsubNotes?.();
+      unsubNotes = null;
       unsubHistory?.();
       unsubHistory = null;
       unsubTasks?.();
@@ -487,6 +603,8 @@ export default function App() {
         setLiveMuted(false);
         setInterimTranscript('');
         setAssistantState('idle');
+        setSearchQuery(null);
+        setSearchSources([]);
       }
 
       // Strictly clear active phrases until Firestore users/{uid}/settings resolves
@@ -496,26 +614,35 @@ export default function App() {
 
       const scopedSettings = loadSettings(nextScope);
       const scopedMemories = loadMemories(nextScope);
+      const scopedNotes = loadNotes(nextScope);
       const scopedTasks = loadTasks(nextScope);
       const scopedSessions = loadSessions(nextScope);
       const scopedHistory = loadHistory(nextScope);
+      const scopedChatbot = loadChatbotMessages<ChatbotMessage>(nextScope);
 
       settingsRef.current = scopedSettings;
       memoriesRef.current = scopedMemories;
+      notesRef.current = scopedNotes;
       tasksRef.current = scopedTasks;
       historyRef.current = scopedHistory;
+      chatbotMessagesRef.current = scopedChatbot;
       recentWakeOpeningsRef.current = loadRecentWakeOpenings(nextScope);
       activeWakeStyleIdxRef.current = loadLastWakeStyleIndex(nextScope);
 
       setSettings(scopedSettings);
       setMemories(scopedMemories);
+      setNotes(scopedNotes);
       setTasks(scopedTasks);
       setSessions(scopedSessions);
       setHistory(scopedHistory);
+      setChatbotMessages(scopedChatbot);
 
       if (!currentUser) {
+        void setFocusHumEnabled(false);
         setNeedsVoiceCodeSetup(true);
         setVoiceCommandsOpen(false);
+        setChatOpen(false);
+        setNotesOpen(false);
         setSettingsOpen(false);
         setMemoryOpen(false);
         setCaptionText(SETUP_REQUIRED_CAPTION);
@@ -582,6 +709,9 @@ export default function App() {
         unsubProfile = subscribeUserProfile(
           currentUser.uid,
           (patch) => {
+            if (Date.now() < pendingSettingsWriteUntilRef.current) {
+              return;
+            }
             setSettings((prev) => {
               const next: TampiSettings = {
                 ...prev,
@@ -623,6 +753,14 @@ export default function App() {
           currentUser.uid,
           (items) => {
             setMemories(items);
+          },
+          (err) => showToast(err.message),
+        );
+
+        unsubNotes = subscribeUserNotes(
+          currentUser.uid,
+          (items) => {
+            setNotes(items);
           },
           (err) => showToast(err.message),
         );
@@ -896,6 +1034,103 @@ export default function App() {
     [showToast],
   );
 
+  const handleAddNote = useCallback(
+    async (params: {
+      kind: 'note' | 'reminder';
+      content: string;
+      remindAt?: string;
+      dueLabel?: string;
+    }) => {
+      const cleanContent = params.content.trim();
+      if (!cleanContent) return;
+
+      let normalizedRemindAt: string | undefined;
+      if (params.remindAt?.trim()) {
+        const parsedMs = Date.parse(params.remindAt.trim());
+        if (!Number.isNaN(parsedMs)) {
+          normalizedRemindAt = new Date(parsedMs).toISOString();
+        }
+      }
+      const kind: 'note' | 'reminder' =
+        params.kind === 'reminder' || Boolean(normalizedRemindAt)
+          ? 'reminder'
+          : 'note';
+      const nowIso = new Date().toISOString();
+      const newNote: SmartNote = {
+        id: makeId('note'),
+        kind,
+        content: cleanContent,
+        remindAt: normalizedRemindAt,
+        dueLabel: params.dueLabel?.trim() || undefined,
+        reminded: false,
+        completed: false,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+
+      const activeUser = userRef.current;
+      if (activeUser) {
+        try {
+          await addFirestoreNote(activeUser.uid, newNote);
+        } catch (err) {
+          showToast(
+            err instanceof Error ? err.message : 'Failed to save smart note.',
+          );
+        }
+      } else {
+        setNotes((prev) => [newNote, ...prev]);
+      }
+    },
+    [showToast],
+  );
+
+  const handleToggleNoteComplete = useCallback(
+    (id: string) => {
+      const target = notesRef.current.find((n) => n.id === id);
+      if (!target) return;
+      const nextCompleted = !target.completed;
+      const activeUser = userRef.current;
+      if (activeUser) {
+        void updateFirestoreNote(activeUser.uid, id, {
+          completed: nextCompleted,
+        }).catch((err) => {
+          showToast(
+            err instanceof Error ? err.message : 'Failed to update note.',
+          );
+        });
+      } else {
+        setNotes((prev) =>
+          prev.map((n) =>
+            n.id === id
+              ? {
+                  ...n,
+                  completed: nextCompleted,
+                  updatedAt: new Date().toISOString(),
+                }
+              : n,
+          ),
+        );
+      }
+    },
+    [showToast],
+  );
+
+  const handleDeleteNote = useCallback(
+    (id: string) => {
+      const activeUser = userRef.current;
+      if (activeUser) {
+        void deleteFirestoreNote(activeUser.uid, id).catch((err) => {
+          showToast(
+            err instanceof Error ? err.message : 'Failed to delete note.',
+          );
+        });
+      } else {
+        setNotes((prev) => prev.filter((n) => n.id !== id));
+      }
+    },
+    [showToast],
+  );
+
   const handleClearHistory = useCallback(() => {
     clearHistoryStorage(scopeKeyRef.current);
     setHistory([]);
@@ -910,7 +1145,16 @@ export default function App() {
     showToast('Conversation history cleared');
   }, [showToast]);
 
-  // Log completed study sprint & cue Live session if connected
+  const scheduleEmotionDecay = useCallback((durationMs = 7500) => {
+    if (emotionDecayTimerRef.current) {
+      window.clearTimeout(emotionDecayTimerRef.current);
+    }
+    emotionDecayTimerRef.current = window.setTimeout(() => {
+      setAvatarEmotion('neutral');
+    }, durationMs);
+  }, []);
+
+  // Log completed study sprint, sound synthesized alarm & cue Live/fallback speech
   const prevTimerActiveRef = useRef(timer.active);
   useEffect(() => {
     if (
@@ -918,6 +1162,7 @@ export default function App() {
       !timer.active &&
       timer.remainingSeconds === 0
     ) {
+      void playTimerCompleteAlarm();
       const durationMinutes = Math.max(1, Math.round(timer.totalSeconds / 60));
       const newSession: StudySessionRecord = {
         id: makeId('sess'),
@@ -936,13 +1181,22 @@ export default function App() {
         setSessions((prev) => [newSession, ...prev]);
       }
       const firstName = userNameRef.current.split(/\s+/)[0] || 'there';
-      const msg = `Hey ${firstName}, your ${timer.label} timer is up! Take a quick breather before the next sprint.`;
+      const isBangla = settingsRef.current.language !== 'en-US';
+      const msg = isBangla
+        ? `${firstName}, তোমার ${timer.label} টাইমার শেষ হয়েছে! এবার একটু ব্রেক নাও।`
+        : `Hey ${firstName}, your ${timer.label} timer is up! Take a quick breather before the next sprint.`;
       setCaptionText(msg);
       showToast(`${timer.label} complete!`);
+      setAvatarEmotion('happy');
+      scheduleEmotionDecay(6500);
       if (liveClientRef.current) {
         liveClientRef.current.sendText(
-          `My ${timer.label} study timer just finished. Tease or congratulate me warmly in your style and remind me to take a short break.`,
+          isBangla
+            ? `[SYSTEM_TIMER_COMPLETE]: আমার ${timer.label} (${durationMinutes} মিনিট) ফোকাস টাইমার মাত্র শেষ হলো। এখন নিজে থেকেই বাংলায় অভিনন্দন জানিয়ে একটু ব্রেক নিতে বলো।`
+            : `[SYSTEM_TIMER_COMPLETE]: My ${timer.label} (${durationMinutes} min) focus timer just finished. Proactively congratulate me and tell me to take a short break.`,
         );
+      } else {
+        speakFallbackUtterance(msg, settingsRef.current.language);
       }
     }
     prevTimerActiveRef.current = timer.active;
@@ -951,14 +1205,86 @@ export default function App() {
     timer.remainingSeconds,
     timer.label,
     timer.totalSeconds,
+    scheduleEmotionDecay,
     showToast,
   ]);
+
+  // Proactive Scheduled Reminder Engine (runs every 10s; speaks even if not prompted)
+  useEffect(() => {
+    const checkDueReminders = () => {
+      const nowMs = Date.now();
+      const dueNotes = notesRef.current.filter((n) => {
+        if (n.completed || n.reminded || !n.remindAt) return false;
+        const ms = Date.parse(n.remindAt);
+        return !Number.isNaN(ms) && ms <= nowMs;
+      });
+      if (dueNotes.length === 0) return;
+
+      const activeUser = userRef.current;
+      const dueIds = new Set(dueNotes.map((n) => n.id));
+      notesRef.current = notesRef.current.map((n) =>
+        dueIds.has(n.id) ? { ...n, reminded: true } : n,
+      );
+      setNotes((prev) =>
+        prev.map((n) => (dueIds.has(n.id) ? { ...n, reminded: true } : n)),
+      );
+
+      for (const note of dueNotes) {
+        if (activeUser) {
+          void updateFirestoreNote(activeUser.uid, note.id, {
+            reminded: true,
+          }).catch(() => {
+            // Firestore errors surfaced elsewhere
+          });
+        }
+      }
+
+      void playReminderAlertChime();
+      const firstName = userNameRef.current.split(/\s+/)[0] || 'Boss';
+      const isBangla = settingsRef.current.language !== 'en-US';
+      const summary = dueNotes.map((n) => n.content).join(', ');
+      const spokenLine = isBangla
+        ? `${firstName}, মনে করিয়ে দিচ্ছি—এখন তোমার "${summary}"-এর সময় হয়ে গেছে!`
+        : `${firstName}, quick heads-up—it's time for "${summary}".`;
+
+      setCaptionText(spokenLine);
+      showToast(`Reminder: ${summary}`);
+      setAvatarEmotion('happy');
+      scheduleEmotionDecay(6500);
+
+      if (liveClientRef.current) {
+        liveClientRef.current.sendText(
+          isBangla
+            ? `[PROACTIVE_REMINDER_TRIGGERED]: এখন নির্ধারিত সময় হয়েছে—ব্যবহারকারীর সেভ করা রিমাইন্ডারটি (${summary}) নিজে থেকেই মনে করিয়ে দাও বাংলায়।`
+            : `[PROACTIVE_REMINDER_TRIGGERED]: The scheduled reminder "${summary}" is due right now. Remind the user warmly and proactively.`,
+        );
+      } else {
+        speakFallbackUtterance(spokenLine, settingsRef.current.language);
+      }
+    };
+
+    checkDueReminders();
+    const intervalId = window.setInterval(checkDueReminders, 10000);
+    return () => window.clearInterval(intervalId);
+  }, [scheduleEmotionDecay, showToast]);
 
   const applyStructuredAction = useCallback(
     (action: StructuredAction) => {
       if (action.type === 'save_memory' && action.content?.trim()) {
         void handleAddMemory(action.category || 'note', action.content.trim());
         showToast('Saved to Personal Memory');
+      } else if (action.type === 'save_note' && action.content?.trim()) {
+        void handleAddNote({
+          kind: action.kind === 'reminder' ? 'reminder' : 'note',
+          content: action.content.trim(),
+          remindAt: action.remindAt,
+          dueLabel: action.dueLabel,
+        });
+        showToast(
+          action.kind === 'reminder' || action.remindAt
+            ? `Reminder saved: ${action.content.trim()}`
+            : `Note saved: ${action.content.trim()}`,
+        );
       } else if (action.type === 'add_task' && action.title?.trim()) {
         handleAddTask(action.title.trim(), action.subject, action.dueLabel);
         showToast(`Added study task: ${action.title.trim()}`);
@@ -985,7 +1311,7 @@ export default function App() {
           totalSeconds: secs,
           remainingSeconds: secs,
         });
-        showToast(`Started ${mins}m ${label} timer`);
+        showToast(`Focus Mode active: ${mins}m ${label}`);
       } else if (action.type === 'stop_timer') {
         setTimer((prev) => ({
           ...prev,
@@ -993,20 +1319,28 @@ export default function App() {
           paused: false,
           remainingSeconds: prev.totalSeconds,
         }));
-        showToast('Study timer stopped');
+        showToast('Focus timer stopped');
+      } else if (action.type === 'toggle_focus_audio') {
+        void setFocusHumEnabled(Boolean(action.enabled));
+        showToast(
+          action.enabled
+            ? 'Sci-Fi Focus Hum enabled'
+            : 'Sci-Fi Focus Hum paused',
+        );
+      } else if (action.type === 'sync_mood' && action.emotion) {
+        setAvatarEmotion(action.emotion);
+        scheduleEmotionDecay(8500);
       }
     },
-    [handleAddMemory, handleAddTask, handleToggleTask, showToast],
+    [
+      handleAddMemory,
+      handleAddNote,
+      handleAddTask,
+      handleToggleTask,
+      scheduleEmotionDecay,
+      showToast,
+    ],
   );
-
-  const scheduleEmotionDecay = useCallback(() => {
-    if (emotionDecayTimerRef.current) {
-      window.clearTimeout(emotionDecayTimerRef.current);
-    }
-    emotionDecayTimerRef.current = window.setTimeout(() => {
-      setAvatarEmotion('neutral');
-    }, 3800);
-  }, []);
 
   const disconnectLive = useCallback(() => {
     if (shutdownDebounceTimerRef.current) {
@@ -1034,10 +1368,17 @@ export default function App() {
       onReady: () => {
         setLiveConnected(true);
         setLiveMuted(false);
+        if (pendingDailyBriefingDateRef.current) {
+          saveLastBriefingDate(
+            pendingDailyBriefingDateRef.current,
+            scopeKeyRef.current,
+          );
+          pendingDailyBriefingDateRef.current = null;
+        }
         const wakeMood =
           activeWakeMoodRef.current ?? pickNextMoodSeed(lastMoodSeedRef.current);
         setAvatarEmotion(getEmotionForMoodSeed(wakeMood));
-        scheduleEmotionDecay();
+        scheduleEmotionDecay(7500);
         setAssistantState('listening');
         if (!wakePendingGreetingRef.current) {
           showToast('Live call connected with Tampi');
@@ -1059,6 +1400,12 @@ export default function App() {
         liveInputBufferRef.current += text;
         const buffered = liveInputBufferRef.current.trim();
         setInterimTranscript(buffered);
+
+        const userMood = detectUserMoodFromTranscript(buffered);
+        if (userMood !== 'neutral') {
+          setAvatarEmotion(userMood);
+          scheduleEmotionDecay(8500);
+        }
 
         if (shutdownDebounceTimerRef.current) {
           window.clearTimeout(shutdownDebounceTimerRef.current);
@@ -1084,6 +1431,15 @@ export default function App() {
         }
       },
       onOutputTranscript: (text) => {
+        if (sleepSequenceActiveRef.current) {
+          liveOutputBufferRef.current += ` ${text}`;
+          const farewellOut = liveOutputBufferRef.current.trim();
+          if (farewellOut) {
+            setCaptionText(farewellOut);
+          }
+          return;
+        }
+
         const pendingInput = liveInputBufferRef.current.trim();
         if (
           shutdownDebounceTimerRef.current &&
@@ -1103,6 +1459,11 @@ export default function App() {
 
         if (pendingInput) {
           appendTurn('user', pendingInput);
+          const userMood = detectUserMoodFromTranscript(pendingInput);
+          if (userMood !== 'neutral') {
+            setAvatarEmotion(userMood);
+            scheduleEmotionDecay(8500);
+          }
           liveInputBufferRef.current = '';
           setInterimTranscript('');
         }
@@ -1140,8 +1501,26 @@ export default function App() {
           }
           setAssistantState('speaking');
         } else {
+          if (sleepSequenceActiveRef.current) {
+            liveInputBufferRef.current = '';
+            setInterimTranscript('');
+            if (liveOutputBufferRef.current.trim()) {
+              appendTurn('model', liveOutputBufferRef.current.trim());
+              liveOutputBufferRef.current = '';
+            }
+            setAssistantState((prev) =>
+              prev === 'speaking' ? 'listening' : prev,
+            );
+            return;
+          }
+
           if (liveInputBufferRef.current.trim()) {
-            appendTurn('user', liveInputBufferRef.current.trim());
+            const cleanedInput = liveInputBufferRef.current.trim();
+            appendTurn('user', cleanedInput);
+            const userMood = detectUserMoodFromTranscript(cleanedInput);
+            if (userMood !== 'neutral') {
+              setAvatarEmotion(userMood);
+            }
             liveInputBufferRef.current = '';
             setInterimTranscript('');
           }
@@ -1161,13 +1540,21 @@ export default function App() {
             appendTurn('model', finalTurn);
             liveOutputBufferRef.current = '';
           }
-          scheduleEmotionDecay();
+          scheduleEmotionDecay(7500);
           setAssistantState((prev) =>
             prev === 'speaking' ? 'listening' : prev,
           );
         }
       },
       onAction: applyStructuredAction,
+      onSearching: (query) => {
+        setSearchQuery(query);
+        setSearchSources([]);
+      },
+      onSearchResults: (query, sources) => {
+        setSearchQuery(query);
+        setSearchSources(sources);
+      },
       onError: (msg) => {
         showToast(msg);
         disconnectLive();
@@ -1185,11 +1572,20 @@ export default function App() {
 
     const wakeMood =
       activeWakeMoodRef.current ?? pickNextMoodSeed(lastMoodSeedRef.current);
+    const todayKey = getLocalDateKey();
+    const isFirstWakeToday =
+      wakePendingGreetingRef.current &&
+      loadLastBriefingDate(scopeKeyRef.current) !== todayKey;
+    pendingDailyBriefingDateRef.current = isFirstWakeToday ? todayKey : null;
+
     const dynamicTrigger = wakePendingGreetingRef.current
       ? buildDynamicWakeTrigger({
           userName: userNameRef.current,
           language: settingsRef.current.language,
           memories: memoriesRef.current,
+          notes: notesRef.current,
+          tasks: tasksRef.current,
+          isFirstWakeToday,
           history: historyRef.current,
           recentWakeOpenings: recentWakeOpeningsRef.current,
           wakeStyleIndex: activeWakeStyleIdxRef.current ?? undefined,
@@ -1203,14 +1599,17 @@ export default function App() {
         userName: userNameRef.current,
         persona: settingsRef.current.personaInstructions,
         memories: memoriesRef.current,
+        notes: notesRef.current,
         tasks: tasksRef.current,
         localDateTime: getLocalDateTimeLabel(),
+        localIsoWithOffset: getLocalIsoWithOffset(),
         language: settingsRef.current.language,
         voiceName: settingsRef.current.liveVoiceName || defaultVoice,
         history: historyRef.current,
         wakeTrigger: dynamicTrigger,
       });
     } catch (err) {
+      pendingDailyBriefingDateRef.current = null;
       const message =
         err instanceof Error
           ? err.message
@@ -1236,18 +1635,53 @@ export default function App() {
   useEffect(() => {
     return () => {
       disconnectLive();
+      void setFocusHumEnabled(false);
       if (shutdownDebounceTimerRef.current) window.clearTimeout(shutdownDebounceTimerRef.current);
       if (wakeHudTimerRef.current) window.clearTimeout(wakeHudTimerRef.current);
       if (wakeConnectTimerRef.current) window.clearTimeout(wakeConnectTimerRef.current);
       if (bootTimerRef.current) window.clearTimeout(bootTimerRef.current);
       if (sleepHudTimerRef.current) window.clearTimeout(sleepHudTimerRef.current);
       if (sleepResumeTimerRef.current) window.clearTimeout(sleepResumeTimerRef.current);
+      if (securityAlertTimerRef.current) window.clearTimeout(securityAlertTimerRef.current);
     };
   }, [disconnectLive]);
+
+  const triggerStandbySecurityAlert = useCallback(() => {
+    setSecurityAlertVisible(true);
+    setSecurityAlertPulseKey((k) => k + 1);
+    suppressStandbyEchoUntilRef.current = Date.now() + 3400;
+
+    if (securityAlertTimerRef.current) {
+      window.clearTimeout(securityAlertTimerRef.current);
+    }
+    securityAlertTimerRef.current = window.setTimeout(() => {
+      securityAlertTimerRef.current = null;
+      setSecurityAlertVisible(false);
+    }, 3200);
+
+    void playAccessDeniedAlertChime();
+    void speakStandbySecurityWarning({
+      onStart: () => {
+        suppressStandbyEchoUntilRef.current = Date.now() + 3400;
+      },
+      onEnd: () => {
+        suppressStandbyEchoUntilRef.current = Date.now() + 450;
+      },
+    });
+  }, []);
 
   const triggerWakeSequence = useCallback(() => {
     // Unlock AudioContext immediately upon wake-up so Gemini Live audio output plays cleanly
     unlockAudioPlayback();
+    standbyPromptPlayedRef.current = true;
+    wrongPasscodeCountRef.current = 0;
+    lastWrongPasscodeAtRef.current = 0;
+    setSecurityAlertVisible(false);
+    if (securityAlertTimerRef.current) {
+      window.clearTimeout(securityAlertTimerRef.current);
+      securityAlertTimerRef.current = null;
+    }
+    sleepSequenceIdRef.current += 1;
 
     if (sleepResumeTimerRef.current) {
       window.clearTimeout(sleepResumeTimerRef.current);
@@ -1255,6 +1689,7 @@ export default function App() {
     }
     sleepSequenceActiveRef.current = false;
     setSleepSequenceActive(false);
+    setSleepPoweringDown(false);
     setSleepHudVisible(false);
 
     // Snapshot previous activity timestamp BEFORE updating lastActiveAt for accurate absence detection
@@ -1319,17 +1754,56 @@ export default function App() {
       window.clearTimeout(wakeConnectTimerRef.current);
     }
     wakePendingGreetingRef.current = true;
+    void connectLive();
     wakeConnectTimerRef.current = window.setTimeout(() => {
+      wakeConnectTimerRef.current = null;
       setWakeSequenceActive(false);
-      void connectLive();
     }, 420);
   }, [connectLive, scheduleEmotionDecay]);
 
+  const finalizeShutdownToSleep = useCallback(
+    (seqId: number) => {
+      if (sleepSequenceIdRef.current !== seqId) return;
+
+      setSleepPoweringDown(true);
+      playShutdownChime();
+      setSleepHudVisible(true);
+      setSleepPulseKey((k) => k + 1);
+      setCaptionText(STANDBY_CAPTION);
+
+      disconnectLive();
+
+      if (sleepHudTimerRef.current) {
+        window.clearTimeout(sleepHudTimerRef.current);
+      }
+      sleepHudTimerRef.current = window.setTimeout(() => {
+        setSleepHudVisible(false);
+      }, 2800);
+
+      if (sleepResumeTimerRef.current) {
+        window.clearTimeout(sleepResumeTimerRef.current);
+      }
+      sleepResumeTimerRef.current = window.setTimeout(() => {
+        if (sleepSequenceIdRef.current !== seqId) return;
+        sleepSequenceActiveRef.current = false;
+        setSleepSequenceActive(false);
+        setSleepPoweringDown(false);
+      }, 950);
+    },
+    [disconnectLive],
+  );
+
   const triggerSleepSequence = useCallback(() => {
     if (sleepSequenceActiveRef.current) return;
+    const seqId = ++sleepSequenceIdRef.current;
     sleepSequenceActiveRef.current = true;
     setSleepSequenceActive(true);
+    setSleepPoweringDown(false);
     standbyManuallyMutedRef.current = false;
+    standbyPromptPlayedRef.current = true;
+    wrongPasscodeCountRef.current = 0;
+    lastWrongPasscodeAtRef.current = 0;
+    setSecurityAlertVisible(false);
     setMicPermissionNeeded(false);
 
     if (shutdownDebounceTimerRef.current) {
@@ -1373,32 +1847,135 @@ export default function App() {
     setBootSequenceActive(false);
     setWakeHudVisible(false);
 
-    playShutdownChime();
-    setSleepHudVisible(true);
-    setSleepPulseKey((k) => k + 1);
-    setCaptionText(STANDBY_CAPTION);
+    liveInputBufferRef.current = '';
+    liveOutputBufferRef.current = '';
+    setInterimTranscript('');
 
-    disconnectLive();
+    const firstName = userNameRef.current.split(/\s+/)[0] || 'Boss';
+    const activeLang = settingsRef.current.language;
+    const isEnglish = activeLang === 'en-US';
+    const farewellLine = isEnglish
+      ? `Passcode verified. Entering standby mode, take care ${firstName}. Goodbye!`
+      : `Passcode verified. Entering standby mode, take care ${firstName}. ভালো থেকো, Goodbye!`;
+    const farewellPrompt = `[SYSTEM_SHUTDOWN_FAREWELL]: The user's shutdown passcode is verified. Speak this warm J.A.R.V.I.S.-style farewell right now in 1 crisp sentence: "${farewellLine}"`;
 
-    if (sleepHudTimerRef.current) {
-      window.clearTimeout(sleepHudTimerRef.current);
+    setCaptionText(farewellLine);
+    setAvatarEmotion('happy');
+
+    const activeClient = liveClientRef.current;
+    if (activeClient) {
+      activeClient.beginShutdownFarewell(farewellPrompt, {
+        onFarewellDone: () => {
+          finalizeShutdownToSleep(seqId);
+        },
+        onFallbackNeeded: () => {
+          if (sleepSequenceIdRef.current !== seqId) return;
+          disconnectLive();
+          setCaptionText(farewellLine);
+          setAvatarEmotion('happy');
+          void speakFarewellFallback(farewellLine, activeLang).then(() => {
+            finalizeShutdownToSleep(seqId);
+          });
+        },
+      });
+    } else {
+      void speakFarewellFallback(farewellLine, activeLang).then(() => {
+        finalizeShutdownToSleep(seqId);
+      });
     }
-    sleepHudTimerRef.current = window.setTimeout(() => {
-      setSleepHudVisible(false);
-    }, 2800);
-
-    if (sleepResumeTimerRef.current) {
-      window.clearTimeout(sleepResumeTimerRef.current);
-    }
-    sleepResumeTimerRef.current = window.setTimeout(() => {
-      sleepSequenceActiveRef.current = false;
-      setSleepSequenceActive(false);
-    }, 950);
-  }, [disconnectLive, updateSettings]);
+  }, [disconnectLive, finalizeShutdownToSleep, updateSettings]);
 
   useEffect(() => {
     triggerSleepSequenceRef.current = triggerSleepSequence;
   }, [triggerSleepSequence]);
+
+  // J.A.R.V.I.S.-style System Voice Prompt ("Confirm your identity" / "Enter your passcode")
+  // Plays automatically when entering Sleeping/Standby Mode on page load, or immediately on first user interaction if autoplay is blocked.
+  useEffect(() => {
+    const inStandbyScreen =
+      Boolean(user) &&
+      !authLoading &&
+      voiceSetupReady &&
+      !needsVoiceCodeSetup &&
+      !voiceCommandsOpen &&
+      !liveConnected &&
+      assistantState === 'idle' &&
+      !wakeSequenceActive &&
+      !sleepSequenceActive;
+
+    if (!inStandbyScreen || standbyPromptPlayedRef.current) {
+      return;
+    }
+
+    let cancelled = false;
+    let promptInFlight = false;
+
+    const triggerStandbyVoicePrompt = async (fromUserGesture: boolean) => {
+      if (cancelled || standbyPromptPlayedRef.current || promptInFlight) return;
+      promptInFlight = true;
+      if (fromUserGesture) {
+        unlockAudioPlayback();
+      }
+      void playStandbyPromptChime();
+      const started = await speakStandbySystemPrompt({
+        onStart: () => {
+          suppressStandbyEchoUntilRef.current = Date.now() + 2800;
+        },
+        onEnd: () => {
+          suppressStandbyEchoUntilRef.current = Date.now() + 350;
+        },
+      });
+      promptInFlight = false;
+      if (cancelled) return;
+      if (started) {
+        standbyPromptPlayedRef.current = true;
+        cleanupGestureListeners();
+      }
+    };
+
+    const onFirstStandbyGesture = () => {
+      void triggerStandbyVoicePrompt(true);
+    };
+
+    const cleanupGestureListeners = () => {
+      window.removeEventListener('pointerdown', onFirstStandbyGesture, true);
+      window.removeEventListener('keydown', onFirstStandbyGesture, true);
+      window.removeEventListener('touchstart', onFirstStandbyGesture, true);
+    };
+
+    window.addEventListener('pointerdown', onFirstStandbyGesture, {
+      capture: true,
+      passive: true,
+    });
+    window.addEventListener('keydown', onFirstStandbyGesture, {
+      capture: true,
+      passive: true,
+    });
+    window.addEventListener('touchstart', onFirstStandbyGesture, {
+      capture: true,
+      passive: true,
+    });
+
+    if (!standbyPromptAttemptedRef.current) {
+      standbyPromptAttemptedRef.current = true;
+      void triggerStandbyVoicePrompt(false);
+    }
+
+    return () => {
+      cancelled = true;
+      cleanupGestureListeners();
+    };
+  }, [
+    user,
+    authLoading,
+    voiceSetupReady,
+    needsVoiceCodeSetup,
+    voiceCommandsOpen,
+    liveConnected,
+    assistantState,
+    wakeSequenceActive,
+    sleepSequenceActive,
+  ]);
 
   // Passive Standby Voice-Code Listener (Web Speech API, dynamic bn-BD / en-US + phonetic/fuzzy matching)
   // Checks ONLY the currently signed-in user's active saved wakePhrases stored under users/{uid}/settings.
@@ -1469,6 +2046,7 @@ export default function App() {
 
     const startListener = () => {
       if (disposed) return;
+      const countedFinalIndices = new Set<number>();
       try {
         recognition = new SpeechCtor();
         recognition.continuous = true;
@@ -1494,15 +2072,27 @@ export default function App() {
 
         recognition.onresult = (event) => {
           if (disposed) return;
-          pulseAudioDot();
 
           const activeWakePhrases = wakePhrasesRef.current;
           if (activeWakePhrases.length === 0) return;
 
           const latestResult = event.results[event.results.length - 1];
           const primaryHeard = latestResult?.[0]?.transcript?.trim();
-          if (primaryHeard) {
-            showHeardPreview(primaryHeard);
+          const lowerPrimary = primaryHeard?.toLowerCase() ?? '';
+          const isSystemPromptEcho =
+            Date.now() < suppressStandbyEchoUntilRef.current &&
+            (lowerPrimary.includes('confirm your identity') ||
+              lowerPrimary.includes('enter your passcode') ||
+              lowerPrimary.includes('access denied') ||
+              lowerPrimary.includes('invalid passcode') ||
+              lowerPrimary.includes('identity') ||
+              lowerPrimary.includes('passcode'));
+
+          if (!isSystemPromptEcho) {
+            pulseAudioDot();
+            if (primaryHeard) {
+              showHeardPreview(primaryHeard);
+            }
           }
 
           for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -1511,7 +2101,7 @@ export default function App() {
             for (let alt = 0; alt < altCount; alt++) {
               const transcript = result?.[alt]?.transcript;
               if (!transcript) continue;
-              if (alt === 0 && !primaryHeard) {
+              if (alt === 0 && !primaryHeard && !isSystemPromptEcho) {
                 showHeardPreview(transcript);
               }
               const prevTranscript =
@@ -1527,6 +2117,8 @@ export default function App() {
                 matchesPhraseList(combined, activeWakePhrases)
               ) {
                 disposed = true;
+                wrongPasscodeCountRef.current = 0;
+                lastWrongPasscodeAtRef.current = 0;
                 try {
                   recognition?.abort();
                 } catch {
@@ -1535,6 +2127,45 @@ export default function App() {
                 triggerWakeSequence();
                 return;
               }
+            }
+          }
+
+          // Track consecutive finalized wrong voice inputs for Standby Security Check (noise-protected + 10s cooldown)
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const result = event.results[i];
+            if (!result?.isFinal || countedFinalIndices.has(i)) continue;
+            countedFinalIndices.add(i);
+
+            const finalPrimary = (result?.[0]?.transcript ?? '').trim();
+            const normalizedFinal = normalizeSpeechText(finalPrimary);
+            if (normalizedFinal.length < 3) continue;
+
+            const isEcho =
+              Date.now() < suppressStandbyEchoUntilRef.current &&
+              (normalizedFinal.includes('confirm your identity') ||
+                normalizedFinal.includes('enter your passcode') ||
+                normalizedFinal.includes('access denied') ||
+                normalizedFinal.includes('invalid passcode') ||
+                normalizedFinal.includes('identity') ||
+                normalizedFinal.includes('passcode'));
+            if (isEcho) continue;
+
+            const now = Date.now();
+            if (now < securityCooldownUntilRef.current) continue;
+            if (now - lastWrongPasscodeAtRef.current < 700) continue;
+
+            if (now - lastWrongPasscodeAtRef.current > 20000) {
+              wrongPasscodeCountRef.current = 0;
+            }
+
+            wrongPasscodeCountRef.current += 1;
+            lastWrongPasscodeAtRef.current = now;
+
+            if (wrongPasscodeCountRef.current >= 2) {
+              wrongPasscodeCountRef.current = 0;
+              securityCooldownUntilRef.current = now + 10000;
+              triggerStandbySecurityAlert();
+              break;
             }
           }
         };
@@ -1664,6 +2295,7 @@ export default function App() {
     sleepSequenceActive,
     micPermissionNeeded,
     standbyRetryNonce,
+    triggerStandbySecurityAlert,
     triggerWakeSequence,
   ]);
 
@@ -1772,6 +2404,12 @@ export default function App() {
       const cleanUserText = userText.trim();
       if (!cleanUserText) return;
 
+      const userMood = detectUserMoodFromTranscript(cleanUserText);
+      if (userMood !== 'neutral') {
+        setAvatarEmotion(userMood);
+        scheduleEmotionDecay(8500);
+      }
+
       if (liveConnected && liveClientRef.current) {
         appendTurn('user', cleanUserText);
         liveClientRef.current.sendText(cleanUserText);
@@ -1798,6 +2436,13 @@ export default function App() {
               category: m.category,
               content: m.content,
             })),
+            notes: notesRef.current.map((n) => ({
+              kind: n.kind,
+              content: n.content,
+              remindAt: n.remindAt,
+              dueLabel: n.dueLabel,
+              completed: n.completed,
+            })),
             tasks: tasksRef.current.map((t) => ({
               title: t.title,
               subject: t.subject,
@@ -1805,6 +2450,7 @@ export default function App() {
               completed: t.completed,
             })),
             localDateTime: getLocalDateTimeLabel(),
+            localIsoWithOffset: getLocalIsoWithOffset(),
             language: settingsRef.current.language,
           }),
         });
@@ -1820,8 +2466,22 @@ export default function App() {
         const reply = stripMarkdownForSpeech(data.reply);
         appendTurn('model', reply);
         setCaptionText(reply);
-        setAvatarEmotion(detectEmotionFromTranscript(reply));
-        scheduleEmotionDecay();
+
+        if (Array.isArray(data.sources) && data.sources.length > 0) {
+          setSearchQuery(cleanUserText);
+          setSearchSources(data.sources);
+        }
+
+        const resolvedEmotion =
+          data.detectedEmotion && data.detectedEmotion !== 'neutral'
+            ? data.detectedEmotion
+            : detectEmotionFromTranscript(reply);
+        if (resolvedEmotion !== 'neutral') {
+          setAvatarEmotion(resolvedEmotion);
+          scheduleEmotionDecay(8500);
+        } else if (userMood === 'neutral') {
+          setAvatarEmotion('neutral');
+        }
 
         if (Array.isArray(data.actions)) {
           data.actions.forEach(applyStructuredAction);
@@ -1837,7 +2497,13 @@ export default function App() {
         setAssistantState('idle');
       }
     },
-    [appendTurn, applyStructuredAction, liveConnected, showToast],
+    [
+      appendTurn,
+      applyStructuredAction,
+      liveConnected,
+      scheduleEmotionDecay,
+      showToast,
+    ],
   );
 
   const handleToggleMute = () => {
@@ -1920,12 +2586,200 @@ export default function App() {
       const next = !prev;
       if (next) {
         setVoiceCommandsOpen(false);
+        setChatOpen(false);
+        setNotesOpen(false);
         setMemoryOpen(false);
         setSettingsOpen(false);
       }
       return next;
     });
   };
+
+  const handleToggleFocusAudio = useCallback(async () => {
+    unlockAudioPlayback();
+    const next = await setFocusHumEnabled(!focusAudioActive);
+    showToast(
+      next ? 'Sci-Fi Focus Hum enabled' : 'Sci-Fi Focus Hum paused',
+    );
+  }, [focusAudioActive, showToast]);
+
+  const handleSendChatbotMessage = useCallback(
+    async (rawText: string) => {
+      const cleanText = rawText.trim();
+      if (!cleanText) return;
+
+      chatbotAbortRef.current?.abort();
+      const controller = new AbortController();
+      chatbotAbortRef.current = controller;
+
+      const priorHistory = chatbotMessagesRef.current
+        .filter((m) => m.text.trim().length > 0)
+        .slice(-40)
+        .map((m) => ({ role: m.role, text: m.text }));
+
+      const userMsg: ChatbotMessage = {
+        id: makeId('cuser'),
+        role: 'user',
+        text: cleanText,
+        timestamp: new Date().toISOString(),
+      };
+      const assistantMsgId = makeId('cmodel');
+      const assistantPlaceholder: ChatbotMessage = {
+        id: assistantMsgId,
+        role: 'model',
+        text: '',
+        timestamp: new Date().toISOString(),
+      };
+
+      setChatbotError(null);
+      setChatbotStreaming(true);
+      setChatbotMessages((prev) =>
+        [...prev, userMsg, assistantPlaceholder].slice(-60),
+      );
+
+      const preset =
+        CHATBOT_ROLE_PRESETS.find((r) => r.id === chatbotRoleId) ??
+        CHATBOT_ROLE_PRESETS[0];
+      const baseInstruction =
+        chatbotRoleId === 'custom'
+          ? chatbotCustomInstruction
+          : chatbotRoleId === 'tampi'
+            ? settingsRef.current.personaInstructions
+            : preset.systemInstruction;
+
+      const contextualInstruction =
+        chatbotRoleId === 'tampi' && memoriesRef.current.length > 0
+          ? `${baseInstruction}\n\nActive User: ${userNameRef.current}\nSaved Memories:\n${memoriesRef.current
+              .slice(0, 8)
+              .map((m) => `- [${m.category}] ${m.content}`)
+              .join('\n')}`
+          : `${baseInstruction}\n\nActive User: ${userNameRef.current}`;
+
+      try {
+        const res = await fetch('/api/chatbot', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            message: cleanText,
+            history: priorHistory,
+            systemInstruction: contextualInstruction,
+            mode: chatbotTaskMode,
+            language: settingsRef.current.language,
+          }),
+        });
+
+        if (!res.ok) {
+          const errJson = (await res.json().catch(() => ({}))) as {
+            error?: string;
+          };
+          throw new Error(errJson.error || `Request failed (${res.status})`);
+        }
+
+        if (!res.body) {
+          throw new Error('Streaming response body unavailable.');
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const events = buffer.split('\n\n');
+          buffer = events.pop() ?? '';
+
+          for (const rawEvent of events) {
+            const line = rawEvent
+              .split('\n')
+              .find((l) => l.startsWith('data: '));
+            if (!line) continue;
+            const payloadStr = line.slice(6).trim();
+            if (!payloadStr) continue;
+
+            const payload = JSON.parse(payloadStr) as {
+              meta?: boolean;
+              delta?: string;
+              done?: boolean;
+              mode?: Exclude<ChatTaskMode, 'auto'>;
+              model?: string;
+              sources?: SearchSource[];
+              error?: string;
+            };
+
+            if (payload.error) {
+              throw new Error(payload.error);
+            }
+
+            if (payload.meta || payload.done) {
+              setChatbotMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantMsgId
+                    ? {
+                        ...m,
+                        modeUsed: payload.mode ?? m.modeUsed,
+                        modelUsed: payload.model ?? m.modelUsed,
+                        sources:
+                          Array.isArray(payload.sources) &&
+                          payload.sources.length > 0
+                            ? payload.sources
+                            : m.sources,
+                      }
+                    : m,
+                ),
+              );
+            }
+
+            if (payload.delta) {
+              setChatbotMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantMsgId
+                    ? { ...m, text: m.text + payload.delta }
+                    : m,
+                ),
+              );
+            }
+          }
+        }
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          return;
+        }
+        const message =
+          err instanceof Error
+            ? err.message
+            : 'Unable to reach Gemini chatbot right now.';
+        setChatbotError(message);
+        setChatbotMessages((prev) =>
+          prev.filter((m) => !(m.id === assistantMsgId && !m.text.trim())),
+        );
+      } finally {
+        if (chatbotAbortRef.current === controller) {
+          chatbotAbortRef.current = null;
+        }
+        setChatbotStreaming(false);
+      }
+    },
+    [chatbotCustomInstruction, chatbotRoleId, chatbotTaskMode],
+  );
+
+  const handleStopChatbotStream = useCallback(() => {
+    chatbotAbortRef.current?.abort();
+    chatbotAbortRef.current = null;
+    setChatbotStreaming(false);
+  }, []);
+
+  const handleClearChatbotThread = useCallback(() => {
+    chatbotAbortRef.current?.abort();
+    chatbotAbortRef.current = null;
+    setChatbotStreaming(false);
+    setChatbotError(null);
+    setChatbotMessages([]);
+    clearChatbotMessages(scopeKeyRef.current);
+  }, []);
 
   const getLipSyncWeights = useCallback((): LipSyncWeights => {
     if (liveClientRef.current) {
@@ -1945,7 +2799,8 @@ export default function App() {
   const isSleeping =
     !wakeSequenceActive &&
     !bootSequenceActive &&
-    (sleepSequenceActive || (!liveConnected && assistantState === 'idle'));
+    (sleepPoweringDown ||
+      (!sleepSequenceActive && !liveConnected && assistantState === 'idle'));
 
   const showTapToEnableStandby =
     micPermissionNeeded &&
@@ -1954,6 +2809,7 @@ export default function App() {
     !voiceCommandsOpen &&
     !settingsOpen &&
     !memoryOpen &&
+    !notesOpen &&
     !liveConnected &&
     assistantState === 'idle';
 
@@ -1964,6 +2820,27 @@ export default function App() {
       : DEFAULT_BUILTIN_VRM_URL;
 
   const resolvedCustomUrl = vrmMetadata ? '' : settings.customGlbUrl.trim();
+
+  const handleTogglePauseTimer = useCallback(() => {
+    setTimer((prev) => ({ ...prev, paused: !prev.paused }));
+  }, []);
+
+  const handleAddFiveMinutes = useCallback(() => {
+    setTimer((prev) => ({
+      ...prev,
+      totalSeconds: prev.totalSeconds + 300,
+      remainingSeconds: prev.remainingSeconds + 300,
+    }));
+  }, []);
+
+  const handleStopTimer = useCallback(() => {
+    setTimer((prev) => ({
+      ...prev,
+      active: false,
+      paused: false,
+      remainingSeconds: prev.totalSeconds,
+    }));
+  }, []);
 
   return (
     <main className="relative h-screen w-screen overflow-hidden bg-[#030711]">
@@ -2046,6 +2923,7 @@ export default function App() {
         emotion={avatarEmotion}
         isSleeping={isSleeping}
         isAvatarResolving={vrmResolving}
+        focusMode={timer.active}
         vrmUrl={resolvedVrmUrl}
         customGlbUrl={resolvedCustomUrl}
         miniWidget={miniWidget}
@@ -2073,7 +2951,7 @@ export default function App() {
         </button>
       )}
 
-      {/* Stark J.A.R.V.I.S. Holographic HUD Reticles, Scanline Sweep & Circular Audio Visualizer */}
+      {/* Stark J.A.R.V.I.S. Holographic HUD Reticles, Scanline Sweep, Countdown Ring & Audio Visualizer */}
       <StarkHud
         assistantState={assistantState}
         emotion={avatarEmotion}
@@ -2082,6 +2960,16 @@ export default function App() {
         bootSequenceActive={bootSequenceActive}
         wakePulseKey={wakePulseKey}
         miniWidget={miniWidget}
+        focusMode={timer.active}
+        focusAudioActive={focusAudioActive}
+        securityAlertActive={securityAlertVisible}
+        timer={timer}
+        onTogglePauseTimer={handleTogglePauseTimer}
+        onAddFiveMinutes={handleAddFiveMinutes}
+        onStopTimer={handleStopTimer}
+        onToggleFocusAudio={() => {
+          void handleToggleFocusAudio();
+        }}
         getAudioSpectrum={getAudioSpectrum}
       />
 
@@ -2092,32 +2980,36 @@ export default function App() {
           voiceMode="live"
           timer={timer}
           memoryCount={memories.length}
+          noteCount={notes.filter((n) => !n.completed).length}
           pendingTaskCount={tasks.filter((t) => !t.completed).length}
+          focusAudioActive={focusAudioActive}
           userDisplayName={user?.displayName || user?.email || null}
           userPhotoUrl={user?.photoURL || null}
           authLoading={authLoading}
           onSignIn={() => void handleSignIn()}
           onSignOut={() => void handleSignOut()}
-          onTogglePauseTimer={() =>
-            setTimer((prev) => ({ ...prev, paused: !prev.paused }))
-          }
-          onAddFiveMinutes={() =>
-            setTimer((prev) => ({
-              ...prev,
-              totalSeconds: prev.totalSeconds + 300,
-              remainingSeconds: prev.remainingSeconds + 300,
-            }))
-          }
-          onStopTimer={() =>
-            setTimer((prev) => ({
-              ...prev,
-              active: false,
-              paused: false,
-              remainingSeconds: prev.totalSeconds,
-            }))
-          }
+          onTogglePauseTimer={handleTogglePauseTimer}
+          onAddFiveMinutes={handleAddFiveMinutes}
+          onStopTimer={handleStopTimer}
+          onToggleFocusAudio={() => {
+            void handleToggleFocusAudio();
+          }}
           onOpenVoiceCommands={() => setVoiceCommandsOpen(true)}
-          onOpenMemory={() => setMemoryOpen(true)}
+          onOpenChat={() => {
+            setMemoryOpen(false);
+            setNotesOpen(false);
+            setChatOpen(true);
+          }}
+          onOpenNotes={() => {
+            setChatOpen(false);
+            setMemoryOpen(false);
+            setNotesOpen(true);
+          }}
+          onOpenMemory={() => {
+            setChatOpen(false);
+            setNotesOpen(false);
+            setMemoryOpen(true);
+          }}
           onOpenSettings={() => setSettingsOpen(true)}
           onToggleMiniWidget={handleToggleMiniWidget}
         />
@@ -2154,6 +3046,27 @@ export default function App() {
         </div>
       )}
 
+      {/* Glowing Red/Amber Security Alert HUD Badge on Repeated Invalid Passcodes */}
+      {securityAlertVisible && !wakeHudVisible && !sleepHudVisible && (
+        <div
+          key={securityAlertPulseKey}
+          role="alert"
+          className="pointer-events-none fixed inset-0 z-30 flex items-center justify-center px-4"
+        >
+          <div className="wake-hud-pop relative flex flex-col items-center gap-1 rounded-2xl bg-[#1a0810]/94 border border-rose-500/85 ring-1 ring-amber-400/55 px-5 py-3.5 shadow-[0_0_44px_rgba(244,63,94,0.48),0_0_24px_rgba(245,158,11,0.32)]">
+            <div className="flex items-center gap-3">
+              <ShieldAlert className="h-5 w-5 text-rose-400 shrink-0 animate-pulse" />
+              <span className="font-mono text-xs sm:text-sm font-semibold tracking-[0.14em] text-rose-100 drop-shadow-[0_0_10px_rgba(244,63,94,0.75)]">
+                ACCESS DENIED • INVALID PASSCODE
+              </span>
+            </div>
+            <span className="font-mono text-[11px] tracking-[0.12em] text-amber-300/95">
+              PLEASE CONFIRM YOUR IDENTITY
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Transient Notification Toast */}
       {toastMessage && !miniWidget && (
         <div className="pointer-events-none fixed left-1/2 top-16 z-30 -translate-x-1/2 rounded-xl bg-[#0d1422]/95 border border-cyan-400/30 px-4 py-2 text-xs font-medium text-cyan-100 shadow-lg">
@@ -2175,6 +3088,11 @@ export default function App() {
           standbyHeardText={standbyHeardText}
           micPermissionNeeded={micPermissionNeeded}
           needsVoiceCodeSetup={needsVoiceCodeSetup}
+          focusMode={timer.active}
+          focusAudioActive={focusAudioActive}
+          securityAlertActive={securityAlertVisible}
+          searchQuery={searchQuery}
+          searchSources={searchSources}
           captionText={captionText}
           interimTranscript={interimTranscript}
           history={history}
@@ -2182,6 +3100,13 @@ export default function App() {
           onToggleMute={handleToggleMute}
           onToggleStandbyWake={() => {
             void handleToggleStandbyWake();
+          }}
+          onToggleFocusAudio={() => {
+            void handleToggleFocusAudio();
+          }}
+          onDismissSearch={() => {
+            setSearchQuery(null);
+            setSearchSources([]);
           }}
           onStopSpeaking={stopSpeaking}
           onChangeLanguage={handleChangeLanguage}
@@ -2320,6 +3245,47 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Multi-Turn Gemini Chatbot Drawer */}
+      <ChatDrawer
+        open={chatOpen}
+        messages={chatbotMessages}
+        roleId={chatbotRoleId}
+        customSystemInstruction={chatbotCustomInstruction}
+        taskMode={chatbotTaskMode}
+        language={settings.language}
+        tampiPersona={settings.personaInstructions}
+        isStreaming={chatbotStreaming}
+        errorMessage={chatbotError}
+        userFirstName={userFirstName}
+        onClose={() => setChatOpen(false)}
+        onChangeRole={setChatbotRoleId}
+        onChangeCustomInstruction={setChatbotCustomInstruction}
+        onChangeTaskMode={setChatbotTaskMode}
+        onSendMessage={(text) => {
+          void handleSendChatbotMessage(text);
+        }}
+        onStopStreaming={handleStopChatbotStream}
+        onClearThread={handleClearChatbotThread}
+      />
+
+      {/* Smart Notes & Scheduled Reminders Vault Drawer */}
+      <NotesVaultDrawer
+        open={notesOpen}
+        notes={notes}
+        isSignedIn={Boolean(user)}
+        onClose={() => setNotesOpen(false)}
+        onAddNote={(params) => {
+          void handleAddNote(params);
+          showToast(
+            params.kind === 'reminder'
+              ? 'Scheduled reminder saved'
+              : 'Smart note saved',
+          );
+        }}
+        onToggleComplete={handleToggleNoteComplete}
+        onDeleteNote={handleDeleteNote}
+      />
 
       {/* Personal Memory & Study Task Drawer */}
       <MemoryDrawer

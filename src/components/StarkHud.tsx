@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
-import { AssistantState, AvatarEmotion } from '../types/tampi';
+import { AudioLines, Pause, Play, Plus, RotateCcw } from 'lucide-react';
+import { AssistantState, AvatarEmotion, StudyTimerState } from '../types/tampi';
 
 interface StarkHudProps {
   assistantState: AssistantState;
@@ -9,7 +10,26 @@ interface StarkHudProps {
   bootSequenceActive: boolean;
   wakePulseKey: number;
   miniWidget?: boolean;
+  focusMode?: boolean;
+  focusAudioActive?: boolean;
+  securityAlertActive?: boolean;
+  timer?: StudyTimerState;
+  onTogglePauseTimer?: () => void;
+  onAddFiveMinutes?: () => void;
+  onStopTimer?: () => void;
+  onToggleFocusAudio?: () => void;
   getAudioSpectrum: (bins: Uint8Array<ArrayBuffer>) => boolean;
+}
+
+function formatTimerClock(totalSeconds: number): string {
+  const safe = Math.max(0, Math.floor(totalSeconds));
+  const hrs = Math.floor(safe / 3600);
+  const mins = Math.floor((safe % 3600) / 60);
+  const secs = safe % 60;
+  if (hrs > 0) {
+    return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
 export const StarkHud: React.FC<StarkHudProps> = ({
@@ -20,6 +40,14 @@ export const StarkHud: React.FC<StarkHudProps> = ({
   bootSequenceActive,
   wakePulseKey,
   miniWidget = false,
+  focusMode = false,
+  focusAudioActive = false,
+  securityAlertActive = false,
+  timer,
+  onTogglePauseTimer,
+  onAddFiveMinutes,
+  onStopTimer,
+  onToggleFocusAudio,
   getAudioSpectrum,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -27,6 +55,8 @@ export const StarkHud: React.FC<StarkHudProps> = ({
   const emotionRef = useRef<AvatarEmotion>(emotion);
   const liveConnectedRef = useRef<boolean>(liveConnected);
   const bootRef = useRef<boolean>(bootSequenceActive);
+  const focusModeRef = useRef<boolean>(focusMode);
+  const securityAlertRef = useRef<boolean>(securityAlertActive);
   const getSpectrumRef = useRef(getAudioSpectrum);
 
   useEffect(() => {
@@ -46,46 +76,75 @@ export const StarkHud: React.FC<StarkHudProps> = ({
   }, [bootSequenceActive]);
 
   useEffect(() => {
+    focusModeRef.current = focusMode;
+  }, [focusMode]);
+
+  useEffect(() => {
+    securityAlertRef.current = securityAlertActive;
+  }, [securityAlertActive]);
+
+  useEffect(() => {
     getSpectrumRef.current = getAudioSpectrum;
   }, [getAudioSpectrum]);
 
   const isActive =
     bootSequenceActive || liveConnected || assistantState !== 'idle';
-  const isSulky =
-    isActive && (emotion === 'sulking' || emotion === 'angry');
+  const isWarmMood =
+    emotion === 'sulking' || emotion === 'angry' || emotion === 'sad';
+  const isFocus = focusMode && !isWarmMood;
 
-  const bracketColorClass = isSulky
-    ? 'border-rose-400/55 shadow-[0_0_12px_rgba(244,63,94,0.28)]'
-    : isActive
-      ? 'border-cyan-400/65 shadow-[0_0_14px_rgba(34,211,238,0.3)]'
-      : 'border-sky-500/35 shadow-[0_0_10px_rgba(14,165,233,0.16)]';
+  const bracketColorClass = securityAlertActive
+    ? 'border-rose-500/90 shadow-[0_0_22px_rgba(244,63,94,0.6),0_0_12px_rgba(245,158,11,0.4)] animate-pulse'
+    : isWarmMood
+      ? 'border-rose-400/55 shadow-[0_0_12px_rgba(244,63,94,0.28)]'
+      : isFocus
+        ? 'border-indigo-400/65 shadow-[0_0_16px_rgba(99,102,241,0.34)]'
+        : isActive
+          ? 'border-cyan-400/65 shadow-[0_0_14px_rgba(34,211,238,0.3)]'
+          : 'border-sky-500/35 shadow-[0_0_10px_rgba(14,165,233,0.16)]';
 
-  const cornerAccentClass = isSulky
-    ? 'bg-amber-400/70'
-    : isActive
-      ? 'bg-amber-400/80'
-      : 'bg-sky-400/40';
+  const cornerAccentClass = securityAlertActive
+    ? 'bg-amber-400'
+    : isWarmMood
+      ? 'bg-amber-400/75'
+      : isFocus
+        ? 'bg-indigo-300/85'
+        : isActive
+          ? 'bg-amber-400/80'
+          : 'bg-sky-400/40';
 
-  const telemetryStatusLabel = bootSequenceActive
-    ? 'BOOTING'
-    : liveConnected || assistantState !== 'idle'
-      ? 'ACTIVE'
-      : 'STANDBY';
+  const telemetryStatusLabel = securityAlertActive
+    ? 'ACCESS DENIED'
+    : bootSequenceActive
+      ? 'BOOTING'
+      : isFocus
+        ? 'FOCUS MODE'
+        : isActive
+          ? 'ACTIVE'
+          : 'STANDBY';
 
-  const telemetryToneClass = isSulky
-    ? 'text-rose-300/90'
-    : isActive
-      ? 'text-cyan-300/95'
-      : standbyListening
-        ? 'text-sky-300/75'
-        : 'text-slate-400/75';
+  const telemetryToneClass = securityAlertActive
+    ? 'text-rose-400 animate-pulse'
+    : isWarmMood
+      ? 'text-rose-300/90'
+      : isFocus
+        ? 'text-indigo-300/95'
+        : isActive
+          ? 'text-cyan-300/95'
+          : standbyListening
+            ? 'text-sky-300/75'
+            : 'text-slate-400/75';
 
-  // Ambient viewport edge glow (shifts Standby deep-blue -> Active cyan/gold -> Sulky rose/amber)
-  const ambientGlowStyle = isSulky
-    ? 'radial-gradient(circle at 50% 44%, rgba(244, 63, 94, 0.14) 0%, rgba(245, 158, 11, 0.08) 38%, transparent 72%)'
-    : isActive
-      ? 'radial-gradient(circle at 50% 44%, rgba(34, 211, 238, 0.15) 0%, rgba(245, 158, 11, 0.06) 42%, transparent 72%)'
-      : 'radial-gradient(circle at 50% 44%, rgba(14, 165, 233, 0.10) 0%, rgba(30, 58, 138, 0.07) 42%, transparent 72%)';
+  // Ambient viewport edge glow (Security Alert -> Standby sky -> Active cyan/gold -> Focus deep indigo -> Sad/Sulky warm rose/amber)
+  const ambientGlowStyle = securityAlertActive
+    ? 'radial-gradient(circle at 50% 44%, rgba(244, 63, 94, 0.25) 0%, rgba(245, 158, 11, 0.14) 40%, rgba(127, 29, 29, 0.18) 76%)'
+    : isWarmMood
+      ? 'radial-gradient(circle at 50% 44%, rgba(244, 63, 94, 0.16) 0%, rgba(245, 158, 11, 0.09) 38%, transparent 72%)'
+      : isFocus
+        ? 'radial-gradient(circle at 50% 44%, rgba(99, 102, 241, 0.19) 0%, rgba(49, 46, 129, 0.14) 44%, rgba(15, 23, 42, 0.28) 76%)'
+        : isActive
+          ? 'radial-gradient(circle at 50% 44%, rgba(34, 211, 238, 0.15) 0%, rgba(245, 158, 11, 0.06) 42%, transparent 72%)'
+          : 'radial-gradient(circle at 50% 44%, rgba(14, 165, 233, 0.10) 0%, rgba(30, 58, 138, 0.07) 42%, transparent 72%)';
 
   // Circular Audio Spectrum Visualizer Canvas Loop
   useEffect(() => {
@@ -136,23 +195,34 @@ export const StarkHud: React.FC<StarkHudProps> = ({
       const emo = emotionRef.current;
       const connected = liveConnectedRef.current;
       const booting = bootRef.current;
+      const focus = focusModeRef.current;
+      const alertMode = securityAlertRef.current;
       const activeMode = booting || connected || mode !== 'idle';
-      const sulkyMode = activeMode && (emo === 'sulking' || emo === 'angry');
+      const warmMode = alertMode || emo === 'sulking' || emo === 'angry' || emo === 'sad';
+      const focusVisual = focus && !warmMode;
 
       const hasAudio = getSpectrumRef.current(bins);
       const isSpeaking = mode === 'speaking' && hasAudio;
 
-      const primaryRgb = sulkyMode
-        ? '251, 113, 133'
-        : activeMode
-          ? '34, 211, 238'
-          : '56, 189, 248';
-      const accentRgb = sulkyMode ? '245, 158, 11' : '245, 158, 11';
+      const primaryRgb = alertMode
+        ? '244, 63, 94'
+        : warmMode
+          ? '251, 113, 133'
+          : focusVisual
+            ? '129, 140, 248'
+            : activeMode
+              ? '34, 211, 238'
+              : '56, 189, 248';
+      const accentRgb = warmMode
+        ? '245, 158, 11'
+        : focusVisual
+          ? '99, 102, 241'
+          : '245, 158, 11';
 
       // Outer subtle segmented ring
       ctx.save();
       ctx.translate(cx, cy);
-      ctx.rotate(t * (booting ? 2.6 : activeMode ? 0.35 : 0.12));
+      ctx.rotate(t * (booting ? 2.6 : focusVisual ? 0.18 : activeMode ? 0.35 : 0.12));
       ctx.lineWidth = Math.max(1, minDim * 0.011);
 
       for (let s = 0; s < 3; s++) {
@@ -161,9 +231,9 @@ export const StarkHud: React.FC<StarkHudProps> = ({
         ctx.beginPath();
         ctx.arc(0, 0, baseRadius + maxBarLen + minDim * 0.032, startAngle, endAngle);
         ctx.strokeStyle =
-          s === 0 && activeMode
+          s === 0 && (activeMode || focusVisual)
             ? `rgba(${accentRgb}, 0.52)`
-            : `rgba(${primaryRgb}, ${activeMode ? 0.42 : 0.22})`;
+            : `rgba(${primaryRgb}, ${activeMode || focusVisual ? 0.44 : 0.22})`;
         ctx.stroke();
       }
       ctx.restore();
@@ -172,7 +242,7 @@ export const StarkHud: React.FC<StarkHudProps> = ({
       ctx.beginPath();
       ctx.arc(cx, cy, baseRadius - minDim * 0.015, 0, Math.PI * 2);
       ctx.lineWidth = Math.max(1, minDim * 0.01);
-      ctx.strokeStyle = `rgba(${primaryRgb}, ${activeMode ? 0.55 : 0.28})`;
+      ctx.strokeStyle = `rgba(${primaryRgb}, ${activeMode || focusVisual ? 0.55 : 0.28})`;
       ctx.stroke();
 
       // Radial audio spectrum bars
@@ -180,7 +250,6 @@ export const StarkHud: React.FC<StarkHudProps> = ({
       for (let i = 0; i < barCount; i++) {
         let targetVal = 0.06;
         if (isSpeaking) {
-          // Map lower-to-mid voice frequencies cleanly around the ring (mirrored/folded for balanced visual)
           const mirrorIdx = i < barCount / 2 ? i : barCount - 1 - i;
           const binIndex = Math.min(54, 1 + Math.floor(mirrorIdx * 1.9));
           const raw = bins[binIndex] / 255;
@@ -214,10 +283,10 @@ export const StarkHud: React.FC<StarkHudProps> = ({
         ctx.lineTo(x1, y1);
         ctx.lineWidth = Math.max(1.5, minDim * 0.017);
         ctx.lineCap = 'round';
-        if (val > 0.62 && activeMode) {
+        if (val > 0.62 && (activeMode || focusVisual)) {
           ctx.strokeStyle = `rgba(${accentRgb}, ${0.75 + val * 0.25})`;
         } else {
-          ctx.strokeStyle = `rgba(${primaryRgb}, ${activeMode ? 0.45 + val * 0.52 : 0.28 + val * 0.35})`;
+          ctx.strokeStyle = `rgba(${primaryRgb}, ${activeMode || focusVisual ? 0.48 + val * 0.5 : 0.28 + val * 0.35})`;
         }
         ctx.stroke();
       }
@@ -234,7 +303,7 @@ export const StarkHud: React.FC<StarkHudProps> = ({
       );
       innerGlow.addColorStop(
         0,
-        `rgba(${primaryRgb}, ${activeMode ? 0.14 + avgEnergy * 0.22 : 0.06})`,
+        `rgba(${primaryRgb}, ${activeMode || focusVisual ? 0.16 + avgEnergy * 0.22 : 0.06})`,
       );
       innerGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
       ctx.fillStyle = innerGlow;
@@ -254,12 +323,21 @@ export const StarkHud: React.FC<StarkHudProps> = ({
     };
   }, [miniWidget]);
 
+  // Holographic Countdown Ring geometry
+  const ringRadius = 64;
+  const ringCircumference = 2 * Math.PI * ringRadius;
+  const timerProgress =
+    timer && timer.totalSeconds > 0
+      ? Math.max(0, Math.min(1, timer.remainingSeconds / timer.totalSeconds))
+      : 0;
+  const ringDashOffset = ringCircumference * (1 - timerProgress);
+
   return (
     <>
       {/* Ambient State & Mood Radial Glow */}
       <div
         aria-hidden="true"
-        className="pointer-events-none fixed inset-0 z-[1] transition-opacity duration-700"
+        className="pointer-events-none fixed inset-0 z-[1] transition-all duration-700"
         style={{ background: ambientGlowStyle }}
       />
 
@@ -317,7 +395,7 @@ export const StarkHud: React.FC<StarkHudProps> = ({
         </div>
       </div>
 
-      {/* Subtle Micro-Telemetry & Right-Side Circular Audio Spectrum Visualizer */}
+      {/* Subtle Micro-Telemetry, Holographic Countdown Ring & Right-Side Circular Audio Spectrum */}
       {!miniWidget && (
         <>
           <div className="pointer-events-none fixed left-6 top-14 sm:left-8 sm:top-[60px] z-10 flex items-center gap-2 font-mono text-[10px] tracking-[0.18em] tabular-nums">
@@ -325,15 +403,164 @@ export const StarkHud: React.FC<StarkHudProps> = ({
             <span className={`font-semibold transition-colors duration-500 ${telemetryToneClass}`}>
               {telemetryStatusLabel}
             </span>
-            {isSulky && (
+            {isWarmMood && (
               <>
                 <span className="text-slate-600" aria-hidden="true">
                   /
                 </span>
-                <span className="text-amber-300/85">OVIMAN</span>
+                <span className="text-amber-300/90">
+                  {emotion === 'sad' ? 'EMPATHY' : 'OVIMAN'}
+                </span>
               </>
             )}
           </div>
+
+          {/* Rotating Holographic Focus Countdown Ring (Visible when Study Timer active) */}
+          {timer?.active && (
+            <section
+              aria-label="Holographic Focus Countdown Ring"
+              className="pointer-events-auto fixed left-3 top-24 sm:left-7 sm:top-1/2 sm:-translate-y-1/2 z-10 flex flex-col items-center gap-2.5 rounded-2xl backdrop-blur-xl bg-[#07091b]/72 border border-indigo-400/35 px-4 py-4 shadow-[0_0_36px_rgba(99,102,241,0.24)]"
+            >
+              <div className="relative h-36 w-36 sm:h-40 sm:w-40 flex items-center justify-center">
+                {/* Outer rotating dashed holographic bezel */}
+                <svg
+                  viewBox="0 0 160 160"
+                  className="absolute inset-0 h-full w-full animate-[spin_28s_linear_infinite]"
+                  aria-hidden="true"
+                >
+                  <circle
+                    cx="80"
+                    cy="80"
+                    r="74"
+                    fill="none"
+                    stroke="rgba(129, 140, 248, 0.36)"
+                    strokeWidth="1.5"
+                    strokeDasharray="10 7 3 7"
+                  />
+                </svg>
+
+                {/* Inner counter-rotating reticle */}
+                <svg
+                  viewBox="0 0 160 160"
+                  className="absolute inset-0 h-full w-full animate-[spin_18s_linear_infinite_reverse]"
+                  aria-hidden="true"
+                >
+                  <circle
+                    cx="80"
+                    cy="80"
+                    r="54"
+                    fill="none"
+                    stroke="rgba(165, 180, 252, 0.25)"
+                    strokeWidth="1"
+                    strokeDasharray="4 6"
+                  />
+                </svg>
+
+                {/* Smooth countdown progress arc */}
+                <svg
+                  viewBox="0 0 160 160"
+                  className="absolute inset-0 h-full w-full -rotate-90"
+                  aria-hidden="true"
+                >
+                  <circle
+                    cx="80"
+                    cy="80"
+                    r={ringRadius}
+                    fill="none"
+                    stroke="rgba(99, 102, 241, 0.16)"
+                    strokeWidth="5"
+                  />
+                  <circle
+                    cx="80"
+                    cy="80"
+                    r={ringRadius}
+                    fill="none"
+                    stroke={timer.paused ? '#f59e0b' : '#818cf8'}
+                    strokeWidth="5"
+                    strokeLinecap="round"
+                    strokeDasharray={ringCircumference}
+                    strokeDashoffset={ringDashOffset}
+                    className="transition-[stroke-dashoffset,stroke] duration-700 ease-linear"
+                  />
+                </svg>
+
+                <div className="relative flex flex-col items-center justify-center text-center px-2">
+                  <span className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-indigo-300/85">
+                    {timer.paused ? 'PAUSED' : 'FOCUS'}
+                  </span>
+                  <span className="mt-0.5 font-mono text-2xl font-bold tracking-tight tabular-nums text-white drop-shadow-[0_0_12px_rgba(129,140,248,0.55)]">
+                    {formatTimerClock(timer.remainingSeconds)}
+                  </span>
+                  <span className="mt-0.5 max-w-[96px] truncate text-[10px] font-medium text-indigo-200/85">
+                    {timer.label}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                {onTogglePauseTimer && (
+                  <button
+                    type="button"
+                    onClick={onTogglePauseTimer}
+                    title={timer.paused ? 'Resume focus timer' : 'Pause focus timer'}
+                    aria-label={timer.paused ? 'Resume focus timer' : 'Pause focus timer'}
+                    className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-500/20 border border-indigo-400/35 text-indigo-100 hover:bg-indigo-500/35 transition-colors"
+                  >
+                    {timer.paused ? (
+                      <Play className="h-3.5 w-3.5" />
+                    ) : (
+                      <Pause className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                )}
+                {onAddFiveMinutes && (
+                  <button
+                    type="button"
+                    onClick={onAddFiveMinutes}
+                    title="Add 5 minutes"
+                    className="flex h-8 items-center gap-0.5 rounded-lg bg-indigo-500/15 border border-indigo-400/30 px-2 font-mono text-[11px] tabular-nums text-indigo-100 hover:bg-indigo-500/30 transition-colors whitespace-nowrap"
+                  >
+                    <Plus className="h-3 w-3" />
+                    5m
+                  </button>
+                )}
+                {onToggleFocusAudio && (
+                  <button
+                    type="button"
+                    onClick={onToggleFocusAudio}
+                    title={
+                      focusAudioActive
+                        ? 'Stop Sci-Fi Focus Hum'
+                        : 'Play Sci-Fi Focus Hum'
+                    }
+                    aria-label={
+                      focusAudioActive
+                        ? 'Stop Sci-Fi Focus Hum'
+                        : 'Play Sci-Fi Focus Hum'
+                    }
+                    className={`flex h-8 w-8 items-center justify-center rounded-lg border transition-colors ${
+                      focusAudioActive
+                        ? 'bg-indigo-400/30 border-indigo-300/60 text-white'
+                        : 'bg-white/[0.04] border-white/15 text-indigo-200 hover:bg-indigo-500/20'
+                    }`}
+                  >
+                    <AudioLines className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                {onStopTimer && (
+                  <button
+                    type="button"
+                    onClick={onStopTimer}
+                    title="Stop focus timer"
+                    aria-label="Stop focus timer"
+                    className="flex h-8 w-8 items-center justify-center rounded-lg bg-white/[0.04] border border-white/12 text-slate-300 hover:bg-rose-500/20 hover:border-rose-400/40 hover:text-rose-200 transition-colors"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+            </section>
+          )}
 
           <div
             aria-hidden="true"
@@ -344,25 +571,29 @@ export const StarkHud: React.FC<StarkHudProps> = ({
               <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
                 <span
                   className={`font-mono text-[8px] sm:text-[9px] font-semibold tracking-[0.16em] ${
-                    isSulky
+                    isWarmMood
                       ? 'text-rose-200/85'
-                      : isActive
-                        ? 'text-cyan-200/90'
-                        : 'text-sky-300/60'
+                      : isFocus
+                        ? 'text-indigo-200/90'
+                        : isActive
+                          ? 'text-cyan-200/90'
+                          : 'text-sky-300/60'
                   }`}
                 >
                   {assistantState === 'speaking'
                     ? 'VOICE'
-                    : isActive
-                      ? 'AUDIO'
-                      : 'IDLE'}
+                    : isFocus
+                      ? 'FOCUS'
+                      : isActive
+                        ? 'AUDIO'
+                        : 'IDLE'}
                 </span>
                 <span className="font-mono text-[7px] sm:text-[8px] tracking-[0.14em] text-amber-300/70">
                   {assistantState === 'speaking'
                     ? 'LIVE'
                     : bootSequenceActive
                       ? 'SYNC'
-                      : isActive
+                      : isActive || isFocus
                         ? 'READY'
                         : '00 dB'}
                 </span>

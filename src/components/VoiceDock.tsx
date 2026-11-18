@@ -1,19 +1,24 @@
 import React, { useState } from 'react';
 import {
+  AudioLines,
   ChevronDown,
   ChevronUp,
+  ExternalLink,
+  Globe,
   History,
   Mic,
   MicOff,
   Radio,
   Send,
   Square,
+  X,
 } from 'lucide-react';
 import {
   AssistantState,
   AvatarEmotion,
   ChatTurn,
   LanguageCode,
+  SearchSource,
 } from '../types/tampi';
 
 interface VoiceDockProps {
@@ -28,12 +33,19 @@ interface VoiceDockProps {
   standbyHeardText?: string;
   micPermissionNeeded: boolean;
   needsVoiceCodeSetup?: boolean;
+  focusMode?: boolean;
+  focusAudioActive?: boolean;
+  securityAlertActive?: boolean;
+  searchQuery?: string | null;
+  searchSources?: SearchSource[];
   captionText: string;
   interimTranscript: string;
   history: ChatTurn[];
   userFirstName: string;
   onToggleMute: () => void;
   onToggleStandbyWake: () => void;
+  onToggleFocusAudio?: () => void;
+  onDismissSearch?: () => void;
   onStopSpeaking: () => void;
   onChangeLanguage: (lang: LanguageCode) => void;
   onSendText: (text: string) => void;
@@ -51,10 +63,17 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({
   standbyHeardText = '',
   micPermissionNeeded,
   needsVoiceCodeSetup = false,
+  focusMode = false,
+  focusAudioActive = false,
+  securityAlertActive = false,
+  searchQuery = null,
+  searchSources = [],
   history,
   userFirstName,
   onToggleMute,
   onToggleStandbyWake,
+  onToggleFocusAudio,
+  onDismissSearch,
   onStopSpeaking,
   onChangeLanguage,
   onSendText,
@@ -66,13 +85,17 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({
   const isSpeaking = assistantState === 'speaking';
   const isThinking = assistantState === 'thinking';
   const isActive = liveConnected || assistantState !== 'idle';
-  const isSulky = isActive && (emotion === 'sulking' || emotion === 'angry');
+  const isWarmMood =
+    emotion === 'sulking' || emotion === 'angry' || emotion === 'sad';
+  const isFocus = focusMode && !isWarmMood;
 
-  const dockFrameClass = isSulky
-    ? 'bg-[#110a16]/72 border-rose-400/35 shadow-[0_0_28px_rgba(244,63,94,0.16)]'
-    : isActive
-      ? 'bg-[#06101f]/72 border-cyan-400/40 shadow-[0_0_32px_rgba(34,211,238,0.18)]'
-      : 'bg-[#060d1b]/68 border-cyan-400/25 shadow-[0_0_26px_rgba(14,165,233,0.12)]';
+  const dockFrameClass = isWarmMood
+    ? 'bg-[#140a14]/76 border-rose-400/40 shadow-[0_0_28px_rgba(244,63,94,0.18)]'
+    : isFocus
+      ? 'bg-[#080b1f]/78 border-indigo-400/45 shadow-[0_0_32px_rgba(99,102,241,0.22)]'
+      : isActive
+        ? 'bg-[#06101f]/72 border-cyan-400/40 shadow-[0_0_32px_rgba(34,211,238,0.18)]'
+        : 'bg-[#060d1b]/68 border-cyan-400/25 shadow-[0_0_26px_rgba(14,165,233,0.12)]';
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -84,6 +107,50 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({
 
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 flex flex-col items-center px-4 pb-4 sm:pb-5">
+      {/* Live Google Search Grounding Sources Bar */}
+      {!collapsed && (searchQuery || searchSources.length > 0) && (
+        <div className="pointer-events-auto mb-2.5 w-full max-w-[760px] rounded-xl backdrop-blur-xl bg-[#071122]/86 border border-cyan-400/30 px-3.5 py-2.5 shadow-lg">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <Globe className="h-3.5 w-3.5 text-cyan-300 shrink-0" />
+              <span className="text-xs font-medium text-cyan-100 truncate">
+                {searchQuery && searchSources.length === 0
+                  ? `Searching live web: ${searchQuery}`
+                  : searchQuery
+                    ? `Live Google Search · ${searchQuery}`
+                    : 'Live Google Search Sources'}
+              </span>
+            </div>
+            {onDismissSearch && (
+              <button
+                type="button"
+                onClick={onDismissSearch}
+                aria-label="Dismiss search sources"
+                className="text-slate-400 hover:text-white transition-colors shrink-0"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+          {searchSources.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {searchSources.slice(0, 4).map((src) => (
+                <a
+                  key={src.uri}
+                  href={src.uri}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex max-w-[230px] items-center gap-1 rounded-lg bg-white/[0.06] border border-white/10 px-2.5 py-1 text-[11px] text-cyan-200 hover:bg-cyan-500/15 hover:border-cyan-400/35 transition-colors"
+                >
+                  <span className="truncate">{src.title}</span>
+                  <ExternalLink className="h-2.5 w-2.5 shrink-0 opacity-75" />
+                </a>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Expandable Recent Conversation Transcript */}
       {showTranscript && !collapsed && (
         <div
@@ -144,53 +211,63 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({
             }
           }}
           className={`pointer-events-auto mb-2 flex max-w-[92vw] items-center gap-2.5 rounded-full backdrop-blur-xl bg-[#071122]/72 border px-3.5 py-1.5 shadow-[0_0_22px_rgba(34,211,238,0.16)] ${
-            micPermissionNeeded
-              ? 'border-amber-400/50 cursor-pointer hover:bg-amber-500/15'
-              : standbyWakeEnabled
-                ? 'border-cyan-400/35 cursor-default'
-                : 'border-white/15 cursor-default'
+            securityAlertActive
+              ? 'border-rose-500/80 bg-[#1a0810]/85 shadow-[0_0_26px_rgba(244,63,94,0.45)]'
+              : micPermissionNeeded
+                ? 'border-amber-400/50 cursor-pointer hover:bg-amber-500/15'
+                : standbyWakeEnabled
+                  ? 'border-cyan-400/35 cursor-default'
+                  : 'border-white/15 cursor-default'
           }`}
         >
           <span className="relative flex h-4 w-4 items-center justify-center shrink-0">
             <span
               className={`absolute inset-0 rounded-full border ${
-                micPermissionNeeded
-                  ? 'border-amber-400 opacity-75'
-                  : standbyWakeEnabled && !needsVoiceCodeSetup
-                    ? 'border-cyan-400 standby-ring-breath'
-                    : 'border-cyan-400 opacity-35'
+                securityAlertActive
+                  ? 'border-rose-400 animate-ping'
+                  : micPermissionNeeded
+                    ? 'border-amber-400 opacity-75'
+                    : standbyWakeEnabled && !needsVoiceCodeSetup
+                      ? 'border-cyan-400 standby-ring-breath'
+                      : 'border-cyan-400 opacity-35'
               }`}
             />
             <span
               className={`h-2 w-2 rounded-full ${
-                micPermissionNeeded
-                  ? 'bg-amber-400/70'
-                  : standbyWakeEnabled && !needsVoiceCodeSetup
-                    ? 'border border-cyan-300 bg-cyan-400/40'
-                    : 'bg-slate-500'
+                securityAlertActive
+                  ? 'bg-rose-400'
+                  : micPermissionNeeded
+                    ? 'bg-amber-400/70'
+                    : standbyWakeEnabled && !needsVoiceCodeSetup
+                      ? 'border border-cyan-300 bg-cyan-400/40'
+                      : 'bg-slate-500'
               }`}
             />
           </span>
           <span
             className={`text-xs font-medium tracking-wide whitespace-nowrap ${
-              micPermissionNeeded
-                ? 'text-amber-200'
-                : standbyWakeEnabled
-                  ? 'text-cyan-200'
-                  : 'text-slate-400'
+              securityAlertActive
+                ? 'text-rose-200'
+                : micPermissionNeeded
+                  ? 'text-amber-200'
+                  : standbyWakeEnabled
+                    ? 'text-cyan-200'
+                    : 'text-slate-400'
             }`}
           >
-            {standbyHeardText
-              ? `Heard: "${standbyHeardText}"`
-              : isThinking
-                ? 'Verifying & connecting...'
-                : needsVoiceCodeSetup
-                  ? 'Set your private voice codes first'
-                  : micPermissionNeeded
-                    ? 'Tap anywhere to enable voice standby'
-                    : standbyWakeEnabled
-                      ? 'Standby • Speak your secret wake code'
-                      : 'Standby listener muted'}
+            {securityAlertActive
+              ? 'Access denied • Confirm your identity'
+              : standbyHeardText
+                ? `Heard: "${standbyHeardText}"`
+                : isThinking
+                  ? 'Verifying & connecting...'
+                  : needsVoiceCodeSetup
+                    ? 'Set your private voice codes first'
+                    : micPermissionNeeded
+                      ? 'Tap anywhere to enable voice standby'
+                      : standbyWakeEnabled
+                        ? 'Standby • Speak your secret wake code'
+                        : 'Standby listener muted'}
           </span>
 
           {standbyListening && standbyAudioDetected && !micPermissionNeeded && (
@@ -325,24 +402,35 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({
               )}
             </div>
 
-            {/* Language Context & Transcript Toggle */}
+            {/* Language Context, Focus Hum & Transcript Toggle */}
             <div className="flex items-center gap-2">
+              {onToggleFocusAudio && (
+                <button
+                  type="button"
+                  onClick={onToggleFocusAudio}
+                  aria-pressed={focusAudioActive}
+                  title={
+                    focusAudioActive
+                      ? 'Stop Sci-Fi Focus Hum'
+                      : 'Play Sci-Fi Focus Hum'
+                  }
+                  aria-label="Toggle Sci-Fi Focus Hum"
+                  className={`flex h-10 items-center gap-1.5 rounded-xl border px-3 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                    focusAudioActive
+                      ? 'bg-indigo-500/25 border-indigo-400/55 text-indigo-100'
+                      : 'bg-white/[0.04] border-white/10 text-slate-300 hover:text-white'
+                  }`}
+                >
+                  <AudioLines className="h-3.5 w-3.5" />
+                  <span className="hidden sm:inline">Focus Hum</span>
+                </button>
+              )}
+
               <div
                 className="flex h-10 items-center rounded-xl bg-white/[0.04] border border-white/10 p-1"
                 role="group"
                 aria-label="Conversation language preference"
               >
-                <button
-                  type="button"
-                  onClick={() => onChangeLanguage('en-US')}
-                  className={`h-8 rounded-lg px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
-                    language === 'en-US'
-                      ? 'bg-white/15 text-white'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  EN
-                </button>
                 <button
                   type="button"
                   onClick={() => onChangeLanguage('bn-BD')}
@@ -353,6 +441,17 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({
                   }`}
                 >
                   BN
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onChangeLanguage('en-US')}
+                  className={`h-8 rounded-lg px-2.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                    language === 'en-US'
+                      ? 'bg-white/15 text-white'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  EN
                 </button>
               </div>
 
@@ -379,7 +478,7 @@ export const VoiceDock: React.FC<VoiceDockProps> = ({
               onChange={(e) => setDraft(e.target.value)}
               placeholder={
                 language === 'bn-BD'
-                  ? 'Tampi ke Banglish ba English e kichu likho...'
+                  ? 'বাংলায় বা Banglish-এ Tampi-কে কিছু লিখো...'
                   : 'Message Tampi, set a 25m study timer, or save a memory...'
               }
               className="h-10 flex-1 rounded-xl bg-white/[0.04] border border-cyan-400/20 px-3.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-cyan-400/55 focus:outline-none transition-colors"

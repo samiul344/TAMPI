@@ -64,21 +64,74 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 }) => {
   const vrmInputRef = useRef<HTMLInputElement | null>(null);
   const [glbUrlInput, setGlbUrlInput] = useState(settings.customGlbUrl);
+  const [personaDraft, setPersonaDraft] = useState(settings.personaInstructions);
+  const [personaSavedNotice, setPersonaSavedNotice] = useState(false);
+  const [wakeDraft, setWakeDraft] = useState(settings.secretWakePhrase);
+  const [shutdownDraft, setShutdownDraft] = useState(
+    settings.secretShutdownPhrase,
+  );
   const [showWakePhrase, setShowWakePhrase] = useState(false);
   const [showShutdownPhrase, setShowShutdownPhrase] = useState(false);
+  const wasOpenRef = useRef(false);
 
   useEffect(() => {
-    setGlbUrlInput(settings.customGlbUrl);
-  }, [settings.customGlbUrl]);
-
-  useEffect(() => {
-    if (!open) {
+    if (open && !wasOpenRef.current) {
+      setGlbUrlInput(settings.customGlbUrl);
+      setPersonaDraft(settings.personaInstructions);
+      setWakeDraft(settings.secretWakePhrase);
+      setShutdownDraft(settings.secretShutdownPhrase);
+      setPersonaSavedNotice(false);
+    }
+    if (!open && wasOpenRef.current) {
       setShowWakePhrase(false);
       setShowShutdownPhrase(false);
+      setPersonaSavedNotice(false);
     }
-  }, [open]);
+    wasOpenRef.current = open;
+  }, [
+    open,
+    settings.customGlbUrl,
+    settings.personaInstructions,
+    settings.secretWakePhrase,
+    settings.secretShutdownPhrase,
+  ]);
 
   if (!open) return null;
+
+  const personaDirty = personaDraft !== settings.personaInstructions;
+
+  const commitPersonaDraft = (allowFallbackOnEmpty: boolean) => {
+    const hasText = personaDraft.trim().length > 0;
+    if (!hasText && !allowFallbackOnEmpty) return;
+    const nextPersona = hasText ? personaDraft : DEFAULT_TAMPI_PERSONA;
+    if (nextPersona !== personaDraft) {
+      setPersonaDraft(nextPersona);
+    }
+    if (nextPersona !== settings.personaInstructions) {
+      onUpdateSettings({ personaInstructions: nextPersona });
+      setPersonaSavedNotice(true);
+    }
+  };
+
+  const handleClose = () => {
+    const patch: Partial<TampiSettings> = {};
+    const nextPersona = personaDraft.trim()
+      ? personaDraft
+      : DEFAULT_TAMPI_PERSONA;
+    if (nextPersona !== settings.personaInstructions) {
+      patch.personaInstructions = nextPersona;
+    }
+    if (wakeDraft !== settings.secretWakePhrase) {
+      patch.secretWakePhrase = wakeDraft;
+    }
+    if (shutdownDraft !== settings.secretShutdownPhrase) {
+      patch.secretShutdownPhrase = shutdownDraft;
+    }
+    if (Object.keys(patch).length > 0) {
+      onUpdateSettings(patch);
+    }
+    onClose();
+  };
 
   const handleVrmFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -107,7 +160,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             aria-label="Close settings"
             className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-400 hover:bg-white/10 hover:text-white transition-colors"
           >
@@ -267,31 +320,58 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
           {/* 3. Tampi Emotional Persona Instructions */}
           <section className="space-y-2.5 border-t border-white/10 pt-5">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <h3 className="text-sm font-semibold text-slate-200">
                 Tampi Persona &amp; Emotions
               </h3>
-              <button
-                type="button"
-                onClick={() =>
-                  onUpdateSettings({
-                    personaInstructions: DEFAULT_TAMPI_PERSONA,
-                  })
-                }
-                className="flex items-center gap-1 text-xs text-slate-400 hover:text-cyan-300 transition-colors"
-              >
-                <RotateCcw className="h-3 w-3" />
-                <span>Reset Default</span>
-              </button>
+              <div className="flex items-center gap-3">
+                {personaDirty ? (
+                  <button
+                    type="button"
+                    onClick={() => commitPersonaDraft(true)}
+                    className="rounded-lg bg-cyan-500/20 border border-cyan-400/45 px-2.5 py-1 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/30 transition-colors"
+                  >
+                    Save Persona
+                  </button>
+                ) : (
+                  personaSavedNotice && (
+                    <span className="text-[11px] font-medium text-emerald-300">
+                      Saved
+                    </span>
+                  )
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPersonaDraft(DEFAULT_TAMPI_PERSONA);
+                    setPersonaSavedNotice(true);
+                    onUpdateSettings({
+                      personaInstructions: DEFAULT_TAMPI_PERSONA,
+                    });
+                  }}
+                  className="flex items-center gap-1 text-xs text-slate-400 hover:text-cyan-300 transition-colors"
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  <span>Reset Default</span>
+                </button>
+              </div>
             </div>
             <textarea
               rows={6}
-              value={settings.personaInstructions}
-              onChange={(e) =>
-                onUpdateSettings({ personaInstructions: e.target.value })
-              }
-              className="custom-scrollbar w-full rounded-xl bg-[#080c15] border border-white/12 p-3 text-xs leading-relaxed text-slate-200 focus:border-cyan-400/50 focus:outline-none"
+              maxLength={4000}
+              value={personaDraft}
+              onChange={(e) => {
+                setPersonaDraft(e.target.value);
+                if (personaSavedNotice) setPersonaSavedNotice(false);
+              }}
+              onBlur={() => commitPersonaDraft(false)}
+              placeholder="Write how Tampi should speak, behave, and express emotions..."
+              className="custom-scrollbar w-full rounded-xl bg-[#080c15] border border-white/12 p-3 text-xs leading-relaxed text-slate-200 placeholder:text-slate-500 focus:border-cyan-400/50 focus:outline-none"
             />
+            <div className="flex items-center justify-between text-[11px] text-slate-500">
+              <span>Edit freely — changes save automatically when you save or close</span>
+              <span className="tabular-nums">{personaDraft.length} / 4000</span>
+            </div>
           </section>
 
           {/* 4. Masked Secret Wake & Shutdown Phrases (Hands-Free Standby & Sleep) */}
@@ -310,10 +390,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   type={showWakePhrase ? 'text' : 'password'}
                   autoComplete="off"
                   spellCheck={false}
-                  value={settings.secretWakePhrase}
-                  onChange={(e) =>
-                    onUpdateSettings({ secretWakePhrase: e.target.value })
-                  }
+                  value={wakeDraft}
+                  onChange={(e) => setWakeDraft(e.target.value)}
+                  onBlur={() => {
+                    if (wakeDraft !== settings.secretWakePhrase) {
+                      onUpdateSettings({ secretWakePhrase: wakeDraft });
+                    }
+                  }}
                   placeholder="Enter your secret wake phrases (separated by commas or /)"
                   aria-label="Secret Wake Phrase"
                   className="h-10 w-full rounded-xl bg-[#080c15] border border-white/12 pl-3 pr-10 text-xs text-slate-200 placeholder:text-slate-500 focus:border-cyan-400/50 focus:outline-none"
@@ -356,10 +439,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   type={showShutdownPhrase ? 'text' : 'password'}
                   autoComplete="off"
                   spellCheck={false}
-                  value={settings.secretShutdownPhrase}
-                  onChange={(e) =>
-                    onUpdateSettings({ secretShutdownPhrase: e.target.value })
-                  }
+                  value={shutdownDraft}
+                  onChange={(e) => setShutdownDraft(e.target.value)}
+                  onBlur={() => {
+                    if (shutdownDraft !== settings.secretShutdownPhrase) {
+                      onUpdateSettings({ secretShutdownPhrase: shutdownDraft });
+                    }
+                  }}
                   placeholder="Enter your secret shutdown phrases (separated by commas or /)"
                   aria-label="Secret Shutdown Phrase"
                   className="h-10 w-full rounded-xl bg-[#080c15] border border-white/12 pl-3 pr-10 text-xs text-slate-200 placeholder:text-slate-500 focus:border-amber-400/50 focus:outline-none"
@@ -394,7 +480,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="flex justify-end border-t border-white/10 px-6 py-3.5">
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             className="rounded-xl bg-cyan-500 px-5 py-2 text-xs font-semibold text-slate-950 hover:bg-cyan-400 transition-colors"
           >
             Done

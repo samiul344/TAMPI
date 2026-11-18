@@ -4,6 +4,7 @@ import {
   defaultVoice,
   MemoryItem,
   migratePersonaIfLegacyDefault,
+  SmartNote,
   StudySessionRecord,
   StudyTask,
   TampiSettings,
@@ -243,6 +244,77 @@ export function saveLastWakeStyleIndex(
     localStorage.setItem(
       scopedKey(scopeKey, 'wake_style_idx_v2'),
       String(index),
+    );
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function loadChatbotMessages<T>(scopeKey = 'guest'): T[] {
+  const parsed = safeParse<unknown>(
+    localStorage.getItem(scopedKey(scopeKey, 'chatbot_thread_v1')),
+    [],
+  );
+  return Array.isArray(parsed) ? (parsed as T[]).slice(-60) : [];
+}
+
+export function saveChatbotMessages<T>(
+  messages: T[],
+  scopeKey = 'guest',
+): void {
+  try {
+    localStorage.setItem(
+      scopedKey(scopeKey, 'chatbot_thread_v1'),
+      JSON.stringify(messages.slice(-60)),
+    );
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function clearChatbotMessages(scopeKey = 'guest'): void {
+  try {
+    localStorage.removeItem(scopedKey(scopeKey, 'chatbot_thread_v1'));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function loadNotes(scopeKey = 'guest'): SmartNote[] {
+  const existing = safeParse<SmartNote[] | null>(
+    localStorage.getItem(scopedKey(scopeKey, 'notes_v1')),
+    null,
+  );
+  return Array.isArray(existing) ? existing : [];
+}
+
+export function saveNotes(notes: SmartNote[], scopeKey = 'guest'): void {
+  try {
+    localStorage.setItem(
+      scopedKey(scopeKey, 'notes_v1'),
+      JSON.stringify(notes),
+    );
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export function loadLastBriefingDate(scopeKey = 'guest'): string | null {
+  try {
+    return localStorage.getItem(scopedKey(scopeKey, 'daily_briefing_date_v1'));
+  } catch {
+    return null;
+  }
+}
+
+export function saveLastBriefingDate(
+  dateStr: string,
+  scopeKey = 'guest',
+): void {
+  try {
+    localStorage.setItem(
+      scopedKey(scopeKey, 'daily_briefing_date_v1'),
+      dateStr,
     );
   } catch {
     // Ignore storage errors

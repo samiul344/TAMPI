@@ -16,6 +16,7 @@ interface TampiStageProps {
   emotion?: AvatarEmotion;
   isSleeping?: boolean;
   isAvatarResolving?: boolean;
+  focusMode?: boolean;
   vrmUrl: string;
   customGlbUrl: string;
   miniWidget?: boolean;
@@ -38,6 +39,9 @@ const _speakCyanColor = new THREE.Color('#22d3ee');
 const _speakGoldAccent = new THREE.Color('#f59e0b');
 const _sulkyRoseColor = new THREE.Color('#fb7185');
 const _sulkyAmberColor = new THREE.Color('#f59e0b');
+const _focusIndigoColor = new THREE.Color('#6366f1');
+const _focusIndigoHalo = new THREE.Color('#4338ca');
+const _focusIndigoAccent = new THREE.Color('#818cf8');
 const _wakeCyanRingColor = new THREE.Color('#22d3ee');
 const _wakeGoldRingColor = new THREE.Color('#f59e0b');
 const _sleepAmberRingColor = new THREE.Color('#f59e0b');
@@ -487,6 +491,7 @@ export const TampiStage: React.FC<TampiStageProps> = ({
   emotion = 'neutral',
   isSleeping = true,
   isAvatarResolving = false,
+  focusMode = false,
   vrmUrl,
   customGlbUrl,
   miniWidget = false,
@@ -500,6 +505,7 @@ export const TampiStage: React.FC<TampiStageProps> = ({
   const stateRef = useRef<AssistantState>(assistantState);
   const emotionRef = useRef<AvatarEmotion>(emotion);
   const isSleepingRef = useRef<boolean>(isSleeping);
+  const focusModeRef = useRef<boolean>(focusMode);
   const miniWidgetRef = useRef<boolean>(miniWidget);
   const standbyListeningRef = useRef<boolean>(standbyListening);
   const wakePulseTimerRef = useRef<number>(-1);
@@ -536,6 +542,10 @@ export const TampiStage: React.FC<TampiStageProps> = ({
   useEffect(() => {
     isSleepingRef.current = isSleeping;
   }, [isSleeping]);
+
+  useEffect(() => {
+    focusModeRef.current = focusMode;
+  }, [focusMode]);
 
   useEffect(() => {
     miniWidgetRef.current = miniWidget;
@@ -1300,13 +1310,21 @@ export const TampiStage: React.FC<TampiStageProps> = ({
           const emoPitch =
             emo === 'sulking'
               ? 0.07
-              : emo === 'shy'
-                ? 0.05
-                : emo === 'angry'
-                  ? -0.04
-                  : 0;
+              : emo === 'sad'
+                ? 0.06
+                : emo === 'shy'
+                  ? 0.05
+                  : emo === 'angry'
+                    ? -0.04
+                    : 0;
           const emoRoll =
-            emo === 'shy' ? 0.08 : emo === 'sulking' ? -0.06 : 0;
+            emo === 'shy'
+              ? 0.08
+              : emo === 'sulking'
+                ? -0.06
+                : emo === 'sad'
+                  ? 0.035
+                  : 0;
 
           const awakeHeadY =
             emoYaw +
@@ -1422,6 +1440,10 @@ export const TampiStage: React.FC<TampiStageProps> = ({
           targetAngry = 0.08;
           targetHappy = 0;
           targetRelaxed = 0;
+        } else if (emo === 'sad') {
+          targetSad = Math.min(MAX_EMOTION_WEIGHT, 0.21 + speechVol * 0.06);
+          targetHappy = 0;
+          targetRelaxed = 0.04;
         } else if (emo === 'shy') {
           targetHappy = 0.18;
           targetRelaxed = 0.22;
@@ -1536,7 +1558,13 @@ export const TampiStage: React.FC<TampiStageProps> = ({
 
       // 4. Multi-Layered Stark Holographic Rings, Cyber Grid & Floating Particles
       const isStandby = standbyListeningRef.current && mode === 'idle';
-      const isSulkyMood = !sleeping && (emo === 'sulking' || emo === 'angry');
+      const isWarmMood =
+        emo === 'sulking' || emo === 'angry' || emo === 'sad';
+      const isFocusVisual =
+        focusModeRef.current &&
+        !isWarmMood &&
+        !isWakeSequence &&
+        !isSleepSequence;
 
       if (isWakeSequence) {
         _targetRingColor.copy(_wakeCyanRingColor);
@@ -1546,10 +1574,14 @@ export const TampiStage: React.FC<TampiStageProps> = ({
         _targetRingColor.copy(_sleepAmberRingColor).lerp(_standbyRingColor, 0.4);
         _targetHaloColor.copy(_standbyHaloColor).lerp(_sleepAmberRingColor, 0.35);
         _targetAccentColor.copy(_sleepAmberRingColor);
-      } else if (isSulkyMood) {
-        _targetRingColor.copy(_sulkyRoseColor).lerp(_activeCyanColor, 0.22);
+      } else if (isWarmMood) {
+        _targetRingColor.copy(_sulkyRoseColor).lerp(_sulkyAmberColor, 0.24);
         _targetHaloColor.copy(_sulkyRoseColor);
         _targetAccentColor.copy(_sulkyAmberColor);
+      } else if (isFocusVisual) {
+        _targetRingColor.copy(_focusIndigoColor);
+        _targetHaloColor.copy(_focusIndigoHalo);
+        _targetAccentColor.copy(_focusIndigoAccent);
       } else if (mode === 'thinking') {
         _targetRingColor.copy(_activeCyanColor).lerp(_thinkRingColor, 0.45);
         _targetHaloColor.copy(_thinkRingColor);
@@ -1588,19 +1620,35 @@ export const TampiStage: React.FC<TampiStageProps> = ({
       holoRig.scanMat.color.lerp(_targetRingColor, colorLerp);
       rimLight.color.lerp(_targetRingColor, colorLerp);
 
+      // Calm ambient lighting in Focus Mode
+      keyLight.intensity = THREE.MathUtils.damp(
+        keyLight.intensity,
+        isFocusVisual ? 1.22 : 1.85,
+        4,
+        dt,
+      );
+      hemiFill.intensity = THREE.MathUtils.damp(
+        hemiFill.intensity,
+        isFocusVisual ? 0.5 : 0.72,
+        4,
+        dt,
+      );
+
       const targetIntensity = isWakeSequence
         ? 2.1 + wakePulseEnv * 2.4
         : isSleepSequence
           ? 1.1 + sleepPulseEnv * 1.3
-          : mode === 'idle' && sleeping
-            ? isStandby
-              ? 1.15 + 0.45 * (0.5 + 0.5 * Math.sin(t * 2.4))
-              : 0.95
-            : mode === 'listening'
-              ? 1.9 + Math.sin(t * 4) * 0.25
-              : mode === 'thinking'
-                ? 2.1 + Math.sin(t * 5.5) * 0.4
-                : 1.95 + smoothedMouth * 1.45;
+          : isFocusVisual
+            ? 1.25 + (mode === 'speaking' ? smoothedMouth * 0.85 : 0.15 * Math.sin(t * 1.8))
+            : mode === 'idle' && sleeping
+              ? isStandby
+                ? 1.15 + 0.45 * (0.5 + 0.5 * Math.sin(t * 2.4))
+                : 0.95
+              : mode === 'listening'
+                ? 1.9 + Math.sin(t * 4) * 0.25
+                : mode === 'thinking'
+                  ? 2.1 + Math.sin(t * 5.5) * 0.4
+                  : 1.95 + smoothedMouth * 1.45;
       primaryCyanMat.emissiveIntensity = THREE.MathUtils.damp(
         primaryCyanMat.emissiveIntensity,
         targetIntensity,
@@ -1609,7 +1657,13 @@ export const TampiStage: React.FC<TampiStageProps> = ({
       );
       accentGoldMat.emissiveIntensity = THREE.MathUtils.damp(
         accentGoldMat.emissiveIntensity,
-        isWakeSequence ? 2.4 + wakePulseEnv * 1.6 : sleeping ? 0.65 : 1.35 + smoothedMouth * 0.7,
+        isWakeSequence
+          ? 2.4 + wakePulseEnv * 1.6
+          : isFocusVisual
+            ? 0.95 + smoothedMouth * 0.45
+            : sleeping
+              ? 0.65
+              : 1.35 + smoothedMouth * 0.7,
         10,
         dt,
       );
@@ -1620,22 +1674,25 @@ export const TampiStage: React.FC<TampiStageProps> = ({
           ? 0.48 + wakePulseEnv * 0.34
           : isSleepSequence
             ? 0.28 + sleepPulseEnv * 0.24
-            : sleeping
-              ? isStandby
-                ? 0.26 + 0.1 * (0.5 + 0.5 * Math.sin(t * 2.4))
-                : 0.2
-              : 0.4 + smoothedMouth * 0.26,
+            : isFocusVisual
+              ? 0.26 + smoothedMouth * 0.14
+              : sleeping
+                ? isStandby
+                  ? 0.26 + 0.1 * (0.5 + 0.5 * Math.sin(t * 2.4))
+                  : 0.2
+                : 0.4 + smoothedMouth * 0.26,
         10,
         dt,
       );
 
       backdropGridMat.opacity = THREE.MathUtils.damp(
         backdropGridMat.opacity,
-        isWakeSequence ? 0.46 : sleeping ? 0.2 : 0.32,
+        isWakeSequence ? 0.46 : isFocusVisual ? 0.22 : sleeping ? 0.2 : 0.32,
         6,
         dt,
       );
-      emitterGrid.rotation.z += dt * (isWakeSequence ? 1.8 : sleeping ? 0.08 : 0.22);
+      emitterGrid.rotation.z +=
+        dt * (isWakeSequence ? 1.8 : isFocusVisual ? 0.12 : sleeping ? 0.08 : 0.22);
 
       const targetScale = isWakeSequence
         ? 1.0 + wakePulseEnv * 0.12
@@ -1657,7 +1714,15 @@ export const TampiStage: React.FC<TampiStageProps> = ({
         ? Math.pow(1 - wakeBootProgress, 2) * 14.5
         : 0;
       const baseSpeedMul =
-        mode === 'thinking' ? 2.2 : mode === 'speaking' ? 1.45 : sleeping ? 0.45 : 1.0;
+        isFocusVisual
+          ? 0.68
+          : mode === 'thinking'
+            ? 2.2
+            : mode === 'speaking'
+              ? 1.45
+              : sleeping
+                ? 0.45
+                : 1.0;
 
       arcLayerCyan.rotation.z += dt * (0.28 * baseSpeedMul + spinLockBoost);
       arcLayerGold.rotation.z -= dt * (0.42 * baseSpeedMul + spinLockBoost * 1.25);
