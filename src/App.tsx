@@ -130,13 +130,14 @@ import {
   pickNextWakeArchetypeIndex,
 } from './utils/wakeContext';
 import {
+  abortBrowserSpeech,
   playAccessDeniedAlertChime,
   playReminderAlertChime,
   playStandbyPromptChime,
   playTimerCompleteAlarm,
   setFocusHumEnabled,
   speakFallbackUtterance,
-  speakFarewellFallback,
+  speakPasscodeVerified,
   speakStandbySecurityWarning,
   speakStandbySystemPrompt,
   subscribeFocusHumState,
@@ -327,6 +328,7 @@ export default function App() {
   const securityCooldownUntilRef = useRef(0);
   const securityAlertTimerRef = useRef<number | null>(null);
   const activeVrmBlobRef = useRef<string>('');
+  const standbyRecognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const liveOutputBufferRef = useRef('');
   const liveInputBufferRef = useRef('');
 
@@ -881,8 +883,39 @@ export default function App() {
     [showToast],
   );
 
+  const pauseStandbyListenerNow = useCallback(() => {
+    const activeRec = standbyRecognitionRef.current;
+    standbyRecognitionRef.current = null;
+    if (activeRec) {
+      try {
+        activeRec.onend = null;
+        activeRec.onerror = null;
+        activeRec.onresult = null;
+        activeRec.onsoundstart = null;
+        activeRec.onspeechstart = null;
+        activeRec.abort();
+      } catch {
+        // ignore abort errors
+      }
+    }
+  }, []);
+
   const stopSpeaking = useCallback(() => {
-    liveClientRef.current?.flushPlayback();
+    liveClientRef.current?.stopAndClearAudioQueue();
+    abortBrowserSpeech();
+    setAssistantState((prev) =>
+      prev === 'speaking' ? (liveConnected ? 'listening' : 'idle') : prev,
+    );
+  }, [liveConnected]);
+
+  const abortCurrentSpeech = useCallback(() => {
+    if (shutdownDebounceTimerRef.current) {
+      window.clearTimeout(shutdownDebounceTimerRef.current);
+      shutdownDebounceTimerRef.current = null;
+    }
+    liveClientRef.current?.abortCurrentSpeech();
+    abortBrowserSpeech();
+    liveOutputBufferRef.current = '';
     setAssistantState((prev) =>
       prev === 'speaking' ? (liveConnected ? 'listening' : 'idle') : prev,
     );
@@ -1364,6 +1397,9 @@ export default function App() {
   }, []);
 
   const connectLive = useCallback(async () => {
+    // Guarantee background SpeechRecognition is completely paused before opening Live mic
+    pauseStandbyListenerNow();
+
     const client = new GeminiLiveClient({
       onReady: () => {
         setLiveConnected(true);
@@ -1387,18 +1423,21 @@ export default function App() {
         }
       },
       onInputTranscript: (text) => {
+        if (sleepSequenceActiveRef.current) return;
+
         const now = Date.now();
-        if (
-          lastInputTranscriptAtRef.current > 0 &&
-          now - lastInputTranscriptAtRef.current > 4000 &&
-          liveInputBufferRef.current.trim()
-        ) {
+        const gapMs =
+          lastInputTranscriptAtRef.current > 0
+            ? now - lastInputTranscriptAtRef.current
+            : 0;
+        if (gapMs > 2200 && liveInputBufferRef.current.trim()) {
           liveInputBufferRef.current = '';
         }
         lastInputTranscriptAtRef.current = now;
 
         liveInputBufferRef.current += text;
         const buffered = liveInputBufferRef.current.trim();
+        const freshChunk = text.trim();
         setInterimTranscript(buffered);
 
         const userMood = detectUserMoodFromTranscript(buffered);
@@ -1412,31 +1451,51 @@ export default function App() {
           shutdownDebounceTimerRef.current = null;
         }
 
-        if (
-          !sleepSequenceActiveRef.current &&
-          matchesStandalonePhraseList(buffered, shutdownPhrasesRef.current)
-        ) {
+        const matchedShutdown =
+          matchesStandalonePhraseList(buffered, shutdownPhrasesRef.current) ||
+          (gapMs > 900 &&
+            freshChunk.length > 0 &&
+            matchesStandalonePhraseList(freshChunk, shutdownPhrasesRef.current));
+
+        if (matchedShutdown) {
           shutdownDebounceTimerRef.current = window.setTimeout(() => {
             shutdownDebounceTimerRef.current = null;
+            const latestBuffered = liveInputBufferRef.current.trim();
             if (
               !sleepSequenceActiveRef.current &&
-              matchesStandalonePhraseList(
-                liveInputBufferRef.current.trim(),
+              (matchesStandalonePhraseList(
+                latestBuffered,
                 shutdownPhrasesRef.current,
-              )
+              ) ||
+                (freshChunk.length > 0 &&
+                  matchesStandalonePhraseList(
+                    freshChunk,
+                    shutdownPhrasesRef.current,
+                  )))
             ) {
               triggerSleepSequenceRef.current();
             }
-          }, 480);
+          }, 320);
         }
+      },
+      onBeforeResponseAudio: (isNewResponse) => {
+        if (sleepSequenceActiveRef.current) return false;
+        const pendingInput = liveInputBufferRef.current.trim();
+        if (
+          isNewResponse &&
+          shutdownDebounceTimerRef.current &&
+          pendingInput &&
+          matchesStandalonePhraseList(pendingInput, shutdownPhrasesRef.current)
+        ) {
+          window.clearTimeout(shutdownDebounceTimerRef.current);
+          shutdownDebounceTimerRef.current = null;
+          triggerSleepSequenceRef.current();
+          return false;
+        }
+        return true;
       },
       onOutputTranscript: (text) => {
         if (sleepSequenceActiveRef.current) {
-          liveOutputBufferRef.current += ` ${text}`;
-          const farewellOut = liveOutputBufferRef.current.trim();
-          if (farewellOut) {
-            setCaptionText(farewellOut);
-          }
           return;
         }
 
@@ -1444,7 +1503,6 @@ export default function App() {
         if (
           shutdownDebounceTimerRef.current &&
           pendingInput &&
-          !sleepSequenceActiveRef.current &&
           matchesStandalonePhraseList(pendingInput, shutdownPhrasesRef.current)
         ) {
           window.clearTimeout(shutdownDebounceTimerRef.current);
@@ -1481,13 +1539,52 @@ export default function App() {
           setAvatarEmotion(detected);
         }
       },
+      onInterrupted: () => {
+        liveOutputBufferRef.current = '';
+      },
+      onTurnComplete: () => {
+        if (sleepSequenceActiveRef.current) return;
+        const pendingInput = liveInputBufferRef.current.trim();
+        if (
+          shutdownDebounceTimerRef.current &&
+          pendingInput &&
+          matchesStandalonePhraseList(pendingInput, shutdownPhrasesRef.current)
+        ) {
+          window.clearTimeout(shutdownDebounceTimerRef.current);
+          shutdownDebounceTimerRef.current = null;
+          triggerSleepSequenceRef.current();
+          return;
+        }
+        if (!shutdownDebounceTimerRef.current && pendingInput) {
+          appendTurn('user', pendingInput);
+          liveInputBufferRef.current = '';
+          setInterimTranscript('');
+        }
+        if (liveOutputBufferRef.current.trim()) {
+          const finalTurn = liveOutputBufferRef.current.trim();
+          const detected = detectEmotionFromTranscript(finalTurn);
+          if (detected !== 'neutral') {
+            setAvatarEmotion(detected);
+          }
+          if (capturingWakeOpeningRef.current) {
+            capturingWakeOpeningRef.current = false;
+            recentWakeOpeningsRef.current = saveRecentWakeOpening(
+              finalTurn,
+              scopeKeyRef.current,
+            );
+          }
+          appendTurn('model', finalTurn);
+          liveOutputBufferRef.current = '';
+        }
+      },
       onSpeakingChange: (speaking) => {
+        if (sleepSequenceActiveRef.current) return;
+
         if (speaking) {
           const pendingInput = liveInputBufferRef.current.trim();
           if (
             shutdownDebounceTimerRef.current &&
             pendingInput &&
-            !sleepSequenceActiveRef.current &&
             matchesStandalonePhraseList(pendingInput, shutdownPhrasesRef.current)
           ) {
             window.clearTimeout(shutdownDebounceTimerRef.current);
@@ -1501,19 +1598,6 @@ export default function App() {
           }
           setAssistantState('speaking');
         } else {
-          if (sleepSequenceActiveRef.current) {
-            liveInputBufferRef.current = '';
-            setInterimTranscript('');
-            if (liveOutputBufferRef.current.trim()) {
-              appendTurn('model', liveOutputBufferRef.current.trim());
-              liveOutputBufferRef.current = '';
-            }
-            setAssistantState((prev) =>
-              prev === 'speaking' ? 'listening' : prev,
-            );
-            return;
-          }
-
           if (liveInputBufferRef.current.trim()) {
             const cleanedInput = liveInputBufferRef.current.trim();
             appendTurn('user', cleanedInput);
@@ -1607,6 +1691,7 @@ export default function App() {
         voiceName: settingsRef.current.liveVoiceName || defaultVoice,
         history: historyRef.current,
         wakeTrigger: dynamicTrigger,
+        micAcquireDelayMs: 120,
       });
     } catch (err) {
       pendingDailyBriefingDateRef.current = null;
@@ -1617,7 +1702,14 @@ export default function App() {
       showToast(message);
       disconnectLive();
     }
-  }, [appendTurn, applyStructuredAction, disconnectLive, scheduleEmotionDecay, showToast]);
+  }, [
+    appendTurn,
+    applyStructuredAction,
+    disconnectLive,
+    pauseStandbyListenerNow,
+    scheduleEmotionDecay,
+    showToast,
+  ]);
 
   // Unlock Web Audio playback on first user interaction anywhere in the window
   useEffect(() => {
@@ -1671,6 +1763,9 @@ export default function App() {
   }, []);
 
   const triggerWakeSequence = useCallback(() => {
+    // Pause background SpeechRecognition immediately so it never competes for the mic during Live calls
+    pauseStandbyListenerNow();
+    abortBrowserSpeech();
     // Unlock AudioContext immediately upon wake-up so Gemini Live audio output plays cleanly
     unlockAudioPlayback();
     standbyPromptPlayedRef.current = true;
@@ -1759,7 +1854,7 @@ export default function App() {
       wakeConnectTimerRef.current = null;
       setWakeSequenceActive(false);
     }, 420);
-  }, [connectLive, scheduleEmotionDecay]);
+  }, [connectLive, pauseStandbyListenerNow, scheduleEmotionDecay]);
 
   const finalizeShutdownToSleep = useCallback(
     (seqId: number) => {
@@ -1806,10 +1901,9 @@ export default function App() {
     setSecurityAlertVisible(false);
     setMicPermissionNeeded(false);
 
-    if (shutdownDebounceTimerRef.current) {
-      window.clearTimeout(shutdownDebounceTimerRef.current);
-      shutdownDebounceTimerRef.current = null;
-    }
+    // 1. Immediately abort any ongoing Gemini Live audio & browser TTS so nothing overlaps or drags on
+    abortCurrentSpeech();
+    disconnectLive();
 
     const nowIso = new Date().toISOString();
     const wasStandbyMuted = !settingsRef.current.standbyWakeEnabled;
@@ -1851,39 +1945,14 @@ export default function App() {
     liveOutputBufferRef.current = '';
     setInterimTranscript('');
 
-    const firstName = userNameRef.current.split(/\s+/)[0] || 'Boss';
-    const activeLang = settingsRef.current.language;
-    const isEnglish = activeLang === 'en-US';
-    const farewellLine = isEnglish
-      ? `Passcode verified. Entering standby mode, take care ${firstName}. Goodbye!`
-      : `Passcode verified. Entering standby mode, take care ${firstName}. ভালো থেকো, Goodbye!`;
-    const farewellPrompt = `[SYSTEM_SHUTDOWN_FAREWELL]: The user's shutdown passcode is verified. Speak this warm J.A.R.V.I.S.-style farewell right now in 1 crisp sentence: "${farewellLine}"`;
+    // 2. Speak ONLY a crisp "Passcode verified." then play power-down chime & enter Standby within ~1s
+    setCaptionText('Passcode verified.');
+    setAvatarEmotion('neutral');
 
-    setCaptionText(farewellLine);
-    setAvatarEmotion('happy');
-
-    const activeClient = liveClientRef.current;
-    if (activeClient) {
-      activeClient.beginShutdownFarewell(farewellPrompt, {
-        onFarewellDone: () => {
-          finalizeShutdownToSleep(seqId);
-        },
-        onFallbackNeeded: () => {
-          if (sleepSequenceIdRef.current !== seqId) return;
-          disconnectLive();
-          setCaptionText(farewellLine);
-          setAvatarEmotion('happy');
-          void speakFarewellFallback(farewellLine, activeLang).then(() => {
-            finalizeShutdownToSleep(seqId);
-          });
-        },
-      });
-    } else {
-      void speakFarewellFallback(farewellLine, activeLang).then(() => {
-        finalizeShutdownToSleep(seqId);
-      });
-    }
-  }, [disconnectLive, finalizeShutdownToSleep, updateSettings]);
+    void speakPasscodeVerified().then(() => {
+      finalizeShutdownToSleep(seqId);
+    });
+  }, [abortCurrentSpeech, disconnectLive, finalizeShutdownToSleep, updateSettings]);
 
   useEffect(() => {
     triggerSleepSequenceRef.current = triggerSleepSequence;
@@ -1994,12 +2063,15 @@ export default function App() {
       hasConfiguredWakePhrases &&
       settings.standbyWakeEnabled &&
       !liveConnected &&
+      !liveClientRef.current &&
       assistantState === 'idle' &&
       !wakeSequenceActive &&
+      !bootSequenceActive &&
       !sleepSequenceActive &&
       !micPermissionNeeded;
 
     if (!shouldListen) {
+      pauseStandbyListenerNow();
       setStandbyListening(false);
       setStandbyAudioDetected(false);
       setStandbyHeardText('');
@@ -2049,6 +2121,7 @@ export default function App() {
       const countedFinalIndices = new Set<number>();
       try {
         recognition = new SpeechCtor();
+        standbyRecognitionRef.current = recognition;
         recognition.continuous = true;
         recognition.interimResults = true;
         recognition.maxAlternatives = 5;
@@ -2268,6 +2341,9 @@ export default function App() {
         standbyAudioDotTimerRef.current = null;
       }
       if (recognition) {
+        if (standbyRecognitionRef.current === recognition) {
+          standbyRecognitionRef.current = null;
+        }
         try {
           recognition.onend = null;
           recognition.onerror = null;
@@ -2292,112 +2368,14 @@ export default function App() {
     liveConnected,
     assistantState,
     wakeSequenceActive,
+    bootSequenceActive,
     sleepSequenceActive,
     micPermissionNeeded,
     standbyRetryNonce,
+    pauseStandbyListenerNow,
     triggerStandbySecurityAlert,
     triggerWakeSequence,
   ]);
-
-  // Parallel Web Speech API Shutdown Watcher during an active Live Call
-  // Works alongside Gemini Live inputTranscription to catch ONLY the signed-in user's saved offPhrases.
-  useEffect(() => {
-    if (!user || !voiceSetupReady || !liveConnected || liveMuted || sleepSequenceActive) {
-      return;
-    }
-
-    const SpeechCtor = getSpeechRecognitionCtor();
-    if (!SpeechCtor) {
-      return;
-    }
-
-    let disposed = false;
-    let recognition: SpeechRecognitionInstance | null = null;
-    let restartTimer: number | null = null;
-    const activeLang: LanguageCode = settings.language;
-
-    const startShutdownWatcher = () => {
-      if (disposed) return;
-      try {
-        recognition = new SpeechCtor();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.maxAlternatives = 5;
-        recognition.lang = activeLang;
-
-        recognition.onresult = (event) => {
-          if (disposed || sleepSequenceActiveRef.current) return;
-          const activeShutdownPhrases = shutdownPhrasesRef.current;
-          if (activeShutdownPhrases.length === 0) return;
-
-          for (let i = event.resultIndex; i < event.results.length; i++) {
-            const result = event.results[i];
-            if (!result?.isFinal) continue;
-            const altCount = Math.min(5, result?.length ?? 5);
-            for (let alt = 0; alt < altCount; alt++) {
-              const transcript = result?.[alt]?.transcript;
-              if (!transcript) continue;
-
-              if (
-                matchesStandalonePhraseList(transcript, activeShutdownPhrases)
-              ) {
-                disposed = true;
-                try {
-                  recognition?.abort();
-                } catch {
-                  // ignore abort errors
-                }
-                triggerSleepSequenceRef.current();
-                return;
-              }
-            }
-          }
-        };
-
-        recognition.onerror = (event) => {
-          if (disposed) return;
-          if (
-            event.error === 'not-allowed' ||
-            event.error === 'service-not-allowed' ||
-            event.error === 'audio-capture'
-          ) {
-            // Browser blocked parallel speech recognition; Gemini Live inputTranscription remains active.
-            disposed = true;
-          }
-        };
-
-        recognition.onend = () => {
-          if (disposed) return;
-          restartTimer = window.setTimeout(() => {
-            startShutdownWatcher();
-          }, 260);
-        };
-
-        recognition.start();
-      } catch {
-        // Ignore if browser restricts parallel SpeechRecognition during active Live mic
-      }
-    };
-
-    startShutdownWatcher();
-
-    return () => {
-      disposed = true;
-      if (restartTimer) {
-        window.clearTimeout(restartTimer);
-      }
-      if (recognition) {
-        try {
-          recognition.onend = null;
-          recognition.onerror = null;
-          recognition.onresult = null;
-          recognition.abort();
-        } catch {
-          // ignore
-        }
-      }
-    };
-  }, [user, voiceSetupReady, liveConnected, liveMuted, sleepSequenceActive, settings.language]);
 
   const sendMessage = useCallback(
     async (userText: string) => {

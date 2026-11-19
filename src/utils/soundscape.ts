@@ -750,6 +750,92 @@ export function speakFallbackUtterance(
   }
 }
 
+export function abortBrowserSpeech(): void {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+    return;
+  }
+  try {
+    window.speechSynthesis.cancel();
+  } catch {
+    // Ignore SpeechSynthesis errors
+  }
+}
+
+/**
+ * Speaks a crisp, concise "Passcode verified." confirmation immediately after
+ * aborting any active speech so shutdown completes cleanly within ~1 second.
+ */
+export async function speakPasscodeVerified(): Promise<void> {
+  if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+    return;
+  }
+
+  try {
+    const voices = await waitForSpeechVoices(120);
+    window.speechSynthesis.cancel();
+
+    const utterance = new SpeechSynthesisUtterance('Passcode verified.');
+    utterance.lang = 'en-GB';
+    utterance.rate = 1.04;
+    utterance.pitch = 0.88;
+    utterance.volume = 0.96;
+
+    const jarvisVoice = selectJarvisSystemVoice(voices);
+    if (jarvisVoice) {
+      utterance.voice = jarvisVoice;
+      utterance.lang = jarvisVoice.lang || 'en-GB';
+    }
+
+    await new Promise<void>((resolve) => {
+      let started = false;
+      let settled = false;
+      let startWatchdog: number | null = null;
+      let endSafetyTimer: number | null = null;
+
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        if (startWatchdog !== null) {
+          window.clearTimeout(startWatchdog);
+          startWatchdog = null;
+        }
+        if (endSafetyTimer !== null) {
+          window.clearTimeout(endSafetyTimer);
+          endSafetyTimer = null;
+        }
+        resolve();
+      };
+
+      utterance.onstart = () => {
+        started = true;
+        if (startWatchdog !== null) {
+          window.clearTimeout(startWatchdog);
+          startWatchdog = null;
+        }
+        endSafetyTimer = window.setTimeout(done, 1350);
+      };
+
+      utterance.onend = done;
+      utterance.onerror = done;
+
+      startWatchdog = window.setTimeout(() => {
+        if (!started) {
+          try {
+            window.speechSynthesis.cancel();
+          } catch {
+            // ignore
+          }
+          done();
+        }
+      }, 320);
+
+      window.speechSynthesis.speak(utterance);
+    });
+  } catch {
+    // Ignore SpeechSynthesis errors
+  }
+}
+
 export async function speakFarewellFallback(
   text: string,
   language: LanguageCode,

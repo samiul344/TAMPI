@@ -900,7 +900,7 @@ async function startServer() {
     clientWs.on('message', async (rawData) => {
       try {
         const msg = JSON.parse(rawData.toString()) as {
-          type: 'init' | 'audio' | 'text' | 'shutdown_farewell';
+          type: 'init' | 'audio' | 'text' | 'shutdown_farewell' | 'abort_shutdown';
           userName?: string;
           audio?: string;
           text?: string;
@@ -999,6 +999,7 @@ async function startServer() {
                 }
               },
               onmessage: async (message: LiveServerMessage) => {
+                if (isClosing || shuttingDown) return;
                 const content = message.serverContent;
                 if (content?.interrupted) {
                   sendJson({ type: 'interrupted' });
@@ -1201,12 +1202,23 @@ async function startServer() {
               mimeType: 'audio/pcm;rate=16000',
             },
           });
+        } else if (msg.type === 'abort_shutdown') {
+          shuttingDown = true;
+          pendingTexts = [];
+          if (liveSession) {
+            try {
+              liveSession.close();
+            } catch {
+              // ignore close errors
+            }
+            liveSession = null;
+          }
         } else if (msg.type === 'shutdown_farewell' && msg.text) {
           shuttingDown = true;
           if (liveSession) {
             forwardTextToLive(liveSession, msg.text, false);
           }
-        } else if (msg.type === 'text' && msg.text) {
+        } else if (msg.type === 'text' && msg.text && !shuttingDown) {
           if (liveSession) {
             forwardTextToLive(liveSession, msg.text, msg.turnComplete);
           } else {

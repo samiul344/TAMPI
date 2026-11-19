@@ -80,25 +80,15 @@ export interface LiveSessionHandlers {
   onReady: () => void;
   onInputTranscript: (text: string) => void;
   onOutputTranscript: (text: string) => void;
+  onBeforeResponseAudio?: (isNewResponse: boolean) => boolean;
   onSpeakingChange: (speaking: boolean) => void;
+  onInterrupted?: () => void;
   onTurnComplete?: () => void;
   onAction: (action: StructuredAction) => void;
   onSearching?: (query: string) => void;
   onSearchResults?: (query: string, sources: SearchSource[]) => void;
   onError: (message: string) => void;
   onClosed: () => void;
-}
-
-interface FarewellState {
-  active: boolean;
-  audioStarted: boolean;
-  turnCompleted: boolean;
-  settled: boolean;
-  onFarewellDone: () => void;
-  onFallbackNeeded: () => void;
-  startWatchdogTimer: number | null;
-  settleTimer: number | null;
-  maxCapTimer: number | null;
 }
 
 export class GeminiLiveClient {
@@ -113,9 +103,12 @@ export class GeminiLiveClient {
   private zeroGainNode: GainNode | null = null;
   private activeSources: Set<AudioBufferSourceNode> = new Set();
   private nextStartTime = 0;
+  private playbackGeneration = 0;
+  private isSpeaking = false;
+  private awaitingNewResponse = true;
+  private speechAborted = false;
   private muted = false;
   private isDisconnected = false;
-  private farewellState: FarewellState | null = null;
   private handlers: LiveSessionHandlers;
 
   constructor(handlers: LiveSessionHandlers) {
@@ -134,9 +127,13 @@ export class GeminiLiveClient {
     voiceName: LiveVoiceName;
     history?: ChatTurn[];
     wakeTrigger?: string;
+    micAcquireDelayMs?: number;
   }): Promise<void> {
     this.disconnect();
     this.isDisconnected = false;
+    this.speechAborted = false;
+    this.awaitingNewResponse = true;
+    this.muted = false;
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/live`;
@@ -159,9 +156,14 @@ export class GeminiLiveClient {
       this.freqData = new Uint8Array(
         new ArrayBuffer(this.analyser.frequencyBinCount),
       );
+      this.nextStartTime = ctx.currentTime;
     })();
 
     const micReadyPromise = (async () => {
+      if (config.micAcquireDelayMs && config.micAcquireDelayMs > 0) {
+        await new Promise((r) => window.setTimeout(r, config.micAcquireDelayMs));
+      }
+      if (this.isDisconnected) return;
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -230,7 +232,7 @@ export class GeminiLiveClient {
 
       if (msg.type === 'ready') {
         await outputReadyPromise.catch(() => {});
-        if (this.isDisconnected) return;
+        if (this.isDisconnected || this.speechAborted) return;
         if (this.outputCtx && this.outputCtx.state === 'suspended') {
           try {
             await this.outputCtx.resume();
@@ -242,85 +244,81 @@ export class GeminiLiveClient {
           playPreSpeechHudSfx();
         }
         await micReadyPromise.catch(() => {});
-        if (this.isDisconnected) return;
+        if (this.isDisconnected || this.speechAborted) return;
         this.startMicCapture();
         this.handlers.onReady();
       } else if (msg.type === 'audio' && msg.audio) {
+        if (this.speechAborted) return;
+        const genBeforeAwait = this.playbackGeneration;
         await outputReadyPromise.catch(() => {});
-        if (this.isDisconnected) return;
-        if (this.farewellState?.active && !this.farewellState.settled) {
-          this.farewellState.audioStarted = true;
-          if (this.farewellState.startWatchdogTimer !== null) {
-            window.clearTimeout(this.farewellState.startWatchdogTimer);
-            this.farewellState.startWatchdogTimer = null;
-          }
-          if (this.farewellState.settleTimer !== null) {
-            window.clearTimeout(this.farewellState.settleTimer);
-            this.farewellState.settleTimer = null;
+        if (
+          this.isDisconnected ||
+          this.speechAborted ||
+          genBeforeAwait !== this.playbackGeneration
+        ) {
+          return;
+        }
+        const isNewResponse = this.awaitingNewResponse;
+        if (this.handlers.onBeforeResponseAudio?.(isNewResponse) === false) {
+          return;
+        }
+        // Clear any lingering previous-turn audio queue as soon as a new response begins
+        if (isNewResponse) {
+          this.awaitingNewResponse = false;
+          if (this.activeSources.size > 0) {
+            this.stopAndClearAudioQueue();
           }
         }
         this.enqueuePlayback(msg.audio);
       } else if (msg.type === 'inputTranscript' && msg.text) {
-        if (!this.farewellState?.active) {
-          if (this.activeSources.size > 0) {
-            this.flushPlayback();
-          }
+        if (!this.speechAborted) {
           this.handlers.onInputTranscript(msg.text);
         }
       } else if (msg.type === 'outputTranscript' && msg.text) {
-        this.handlers.onOutputTranscript(msg.text);
+        if (!this.speechAborted) {
+          this.handlers.onOutputTranscript(msg.text);
+        }
       } else if (msg.type === 'interrupted') {
-        this.flushPlayback();
-        if (this.farewellState?.active && !this.farewellState.settled) {
-          this.farewellState.audioStarted = false;
-          this.farewellState.turnCompleted = false;
-        }
+        this.awaitingNewResponse = true;
+        this.stopAndClearAudioQueue();
+        this.handlers.onInterrupted?.();
       } else if (msg.type === 'turnComplete') {
-        if (this.farewellState?.active && !this.farewellState.settled) {
-          this.farewellState.turnCompleted = true;
-          this.maybeCompleteFarewell();
-        }
+        this.awaitingNewResponse = true;
         this.handlers.onTurnComplete?.();
       } else if (msg.type === 'searching' && msg.query) {
-        this.handlers.onSearching?.(msg.query);
+        if (!this.speechAborted) {
+          this.handlers.onSearching?.(msg.query);
+        }
       } else if (msg.type === 'searchResults') {
-        this.handlers.onSearchResults?.(
-          msg.query ?? '',
-          Array.isArray(msg.sources) ? msg.sources : [],
-        );
+        if (!this.speechAborted) {
+          this.handlers.onSearchResults?.(
+            msg.query ?? '',
+            Array.isArray(msg.sources) ? msg.sources : [],
+          );
+        }
       } else if (msg.type === 'action' && msg.action) {
-        this.handlers.onAction(msg.action);
+        if (!this.speechAborted) {
+          this.handlers.onAction(msg.action);
+        }
       } else if (msg.type === 'error' && msg.error) {
-        if (this.farewellState?.active && !this.farewellState.settled) {
-          this.triggerFarewellFallback();
-        } else {
+        if (!this.speechAborted) {
           this.handlers.onError(msg.error);
         }
       } else if (msg.type === 'closed') {
-        if (this.farewellState?.active && !this.farewellState.settled) {
-          this.triggerFarewellFallback();
-        } else {
+        if (!this.speechAborted) {
           this.handlers.onClosed();
         }
       }
     };
 
     ws.onerror = () => {
-      if (this.isDisconnected) return;
-      if (this.farewellState?.active && !this.farewellState.settled) {
-        this.triggerFarewellFallback();
-      } else {
-        this.handlers.onError('WebSocket connection to Live voice service failed.');
-      }
+      if (this.isDisconnected || this.speechAborted) return;
+      this.handlers.onError('WebSocket connection to Live voice service failed.');
     };
 
     ws.onclose = () => {
-      if (this.isDisconnected) return;
-      if (this.farewellState?.active && !this.farewellState.settled) {
-        this.triggerFarewellFallback();
-      } else {
-        this.handlers.onClosed();
-      }
+      if (this.isDisconnected || this.speechAborted) return;
+      this.handlers.onClosed();
     };
 
     await Promise.all([outputReadyPromise, micReadyPromise]);
@@ -343,6 +341,7 @@ export class GeminiLiveClient {
     this.processor.onaudioprocess = (event) => {
       if (
         this.muted ||
+        this.speechAborted ||
         this.isDisconnected ||
         !this.ws ||
         this.ws.readyState !== WebSocket.OPEN
@@ -357,12 +356,14 @@ export class GeminiLiveClient {
   }
 
   private enqueuePlayback(base64Pcm: string): void {
-    if (!this.outputCtx || !this.analyser) return;
+    if (!this.outputCtx || !this.analyser || this.speechAborted) return;
     if (this.outputCtx.state === 'suspended') {
       void this.outputCtx.resume();
     }
 
     const samples = base64ToInt16Float32(base64Pcm);
+    if (samples.length === 0) return;
+
     const buffer = this.outputCtx.createBuffer(1, samples.length, 24000);
     buffer.getChannelData(0).set(samples);
 
@@ -371,133 +372,49 @@ export class GeminiLiveClient {
     source.connect(this.analyser);
 
     const now = this.outputCtx.currentTime;
-    if (this.nextStartTime < now) {
-      this.nextStartTime = now + 0.015;
+    // Use a 45ms jitter cushion when starting from silence or recovering from underrun;
+    // consecutive chunks in the same response stitch sample-accurately with zero gap or overlap.
+    if (this.activeSources.size === 0 || this.nextStartTime < now + 0.005) {
+      this.nextStartTime = now + 0.045;
     }
 
-    source.start(this.nextStartTime);
-    this.nextStartTime += buffer.duration;
+    const scheduledStart = this.nextStartTime;
+    const generation = this.playbackGeneration;
+    source.start(scheduledStart);
+    this.nextStartTime = scheduledStart + buffer.duration;
     this.activeSources.add(source);
-    this.handlers.onSpeakingChange(true);
+
+    if (!this.isSpeaking) {
+      this.isSpeaking = true;
+      this.handlers.onSpeakingChange(true);
+    }
 
     source.onended = () => {
+      if (generation !== this.playbackGeneration) return;
       this.activeSources.delete(source);
-      if (this.activeSources.size === 0) {
+      try {
+        source.disconnect();
+      } catch {
+        // ignore
+      }
+      if (this.activeSources.size === 0 && this.isSpeaking) {
+        this.isSpeaking = false;
         this.handlers.onSpeakingChange(false);
-        if (this.farewellState?.active && !this.farewellState.settled) {
-          this.maybeCompleteFarewell();
-        }
       }
     };
   }
 
-  private clearFarewellTimers(): void {
-    if (!this.farewellState) return;
-    if (this.farewellState.startWatchdogTimer !== null) {
-      window.clearTimeout(this.farewellState.startWatchdogTimer);
-      this.farewellState.startWatchdogTimer = null;
-    }
-    if (this.farewellState.settleTimer !== null) {
-      window.clearTimeout(this.farewellState.settleTimer);
-      this.farewellState.settleTimer = null;
-    }
-    if (this.farewellState.maxCapTimer !== null) {
-      window.clearTimeout(this.farewellState.maxCapTimer);
-      this.farewellState.maxCapTimer = null;
-    }
-  }
-
-  private triggerFarewellFallback(): void {
-    const state = this.farewellState;
-    if (!state || state.settled) return;
-    state.settled = true;
-    state.active = false;
-    this.clearFarewellTimers();
-    this.farewellState = null;
-    state.onFallbackNeeded();
-  }
-
-  private maybeCompleteFarewell(): void {
-    const state = this.farewellState;
-    if (!state || !state.active || state.settled) return;
-    if (!state.audioStarted || !state.turnCompleted || this.activeSources.size > 0) {
-      return;
-    }
-    if (state.settleTimer !== null) {
-      window.clearTimeout(state.settleTimer);
-    }
-    state.settleTimer = window.setTimeout(() => {
-      if (!state.active || state.settled) return;
-      if (this.activeSources.size > 0) return;
-      state.settled = true;
-      state.active = false;
-      this.clearFarewellTimers();
-      this.farewellState = null;
-      state.onFarewellDone();
-    }, 240);
-  }
-
-  public beginShutdownFarewell(
-    prompt: string,
-    callbacks: {
-      onFarewellDone: () => void;
-      onFallbackNeeded: () => void;
-    },
-  ): void {
-    this.clearFarewellTimers();
-    this.muted = true;
-    this.flushPlayback();
-
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN || this.isDisconnected) {
-      callbacks.onFallbackNeeded();
-      return;
-    }
-
-    const state: FarewellState = {
-      active: true,
-      audioStarted: false,
-      turnCompleted: false,
-      settled: false,
-      onFarewellDone: callbacks.onFarewellDone,
-      onFallbackNeeded: callbacks.onFallbackNeeded,
-      startWatchdogTimer: null,
-      settleTimer: null,
-      maxCapTimer: null,
-    };
-    this.farewellState = state;
-
-    state.startWatchdogTimer = window.setTimeout(() => {
-      if (!state.settled && !state.audioStarted) {
-        this.triggerFarewellFallback();
-      }
-    }, 2600);
-
-    state.maxCapTimer = window.setTimeout(() => {
-      if (!state.settled) {
-        state.settled = true;
-        state.active = false;
-        this.clearFarewellTimers();
-        this.farewellState = null;
-        if (state.audioStarted) {
-          state.onFarewellDone();
-        } else {
-          state.onFallbackNeeded();
-        }
-      }
-    }, 9500);
-
-    this.ws.send(
-      JSON.stringify({
-        type: 'shutdown_farewell',
-        text: prompt.trim(),
-      }),
-    );
-  }
-
-  public flushPlayback(): void {
+  /**
+   * Immediately stops all scheduled/playing Web Audio buffer sources and clears the queue
+   * so newly arriving audio never overlaps with prior speech.
+   */
+  public stopAndClearAudioQueue(): void {
+    this.playbackGeneration += 1;
     for (const src of this.activeSources) {
       try {
+        src.onended = null;
         src.stop();
+        src.disconnect();
       } catch {
         // already stopped
       }
@@ -505,12 +422,56 @@ export class GeminiLiveClient {
     this.activeSources.clear();
     if (this.outputCtx) {
       this.nextStartTime = this.outputCtx.currentTime;
+    } else {
+      this.nextStartTime = 0;
     }
-    this.handlers.onSpeakingChange(false);
+    if (this.isSpeaking) {
+      this.isSpeaking = false;
+      this.handlers.onSpeakingChange(false);
+    }
+  }
+
+  /**
+   * Alias for stopAndClearAudioQueue for callers stopping current playback.
+   */
+  public flushPlayback(): void {
+    this.stopAndClearAudioQueue();
+  }
+
+  /**
+   * Hard-aborts all ongoing Live audio, mutes the mic, cancels any browser TTS,
+   * and signals the server to terminate the Gemini Live turn immediately (used on Shutdown).
+   */
+  public abortCurrentSpeech(): void {
+    this.speechAborted = true;
+    this.muted = true;
+    this.awaitingNewResponse = true;
+    this.stopAndClearAudioQueue();
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // ignore
+      }
+    }
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify({ type: 'abort_shutdown' }));
+      } catch {
+        // ignore
+      }
+    }
   }
 
   public sendText(text: string): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN && text.trim()) {
+    if (
+      this.ws &&
+      this.ws.readyState === WebSocket.OPEN &&
+      text.trim() &&
+      !this.speechAborted
+    ) {
+      this.stopAndClearAudioQueue();
+      this.awaitingNewResponse = true;
       this.ws.send(JSON.stringify({ type: 'text', text: text.trim() }));
     }
   }
@@ -577,13 +538,9 @@ export class GeminiLiveClient {
 
   public disconnect(): void {
     this.isDisconnected = true;
-    this.clearFarewellTimers();
-    if (this.farewellState) {
-      this.farewellState.settled = true;
-      this.farewellState.active = false;
-      this.farewellState = null;
-    }
-    this.flushPlayback();
+    this.speechAborted = true;
+    this.awaitingNewResponse = true;
+    this.stopAndClearAudioQueue();
 
     if (this.processor) {
       this.processor.disconnect();

@@ -474,31 +474,37 @@ export function matchesStandalonePhraseList(
   const tWords = normalizedTranscript.split(' ').filter(Boolean);
   if (tWords.length === 0) return false;
 
+  // Build candidate slices by stripping at most 2 leading and/or 1 trailing address words
+  const candidates = new Set<string>([normalizedTranscript]);
+  let leadStart = 0;
+  while (
+    leadStart < 2 &&
+    leadStart < tWords.length - 1 &&
+    isStandaloneAddressWord(tWords[leadStart])
+  ) {
+    leadStart += 1;
+    candidates.add(tWords.slice(leadStart).join(' '));
+  }
+
+  let trailEnd = tWords.length;
+  if (trailEnd > 1 && isStandaloneAddressWord(tWords[trailEnd - 1])) {
+    trailEnd -= 1;
+    candidates.add(tWords.slice(0, trailEnd).join(' '));
+    if (leadStart > 0 && leadStart < trailEnd) {
+      candidates.add(tWords.slice(leadStart, trailEnd).join(' '));
+      if (leadStart === 2 && 1 < trailEnd) {
+        candidates.add(tWords.slice(1, trailEnd).join(' '));
+      }
+    }
+  }
+
   for (const rawPhrase of phrases) {
     const phrase = normalizeSpeechText(rawPhrase);
     if (!phrase) continue;
 
-    // 0 extra words: entire trimmed utterance matches the command
-    if (matchesSingleStandaloneUtterance(normalizedTranscript, phrase)) {
-      return true;
-    }
-
-    // At most 1 extra address word at the start OR end (e.g. "tampi <cmd>" or "<cmd> please")
-    if (tWords.length >= 2) {
-      const firstWord = tWords[0];
-      if (isStandaloneAddressWord(firstWord)) {
-        const withoutFirst = tWords.slice(1).join(' ');
-        if (matchesSingleStandaloneUtterance(withoutFirst, phrase)) {
-          return true;
-        }
-      }
-
-      const lastWord = tWords[tWords.length - 1];
-      if (isStandaloneAddressWord(lastWord)) {
-        const withoutLast = tWords.slice(0, -1).join(' ');
-        if (matchesSingleStandaloneUtterance(withoutLast, phrase)) {
-          return true;
-        }
+    for (const candidate of candidates) {
+      if (matchesSingleStandaloneUtterance(candidate, phrase)) {
+        return true;
       }
     }
   }
